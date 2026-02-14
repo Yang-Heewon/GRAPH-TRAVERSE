@@ -7,11 +7,7 @@ CWQ/WebQSP 공통 TRM 파이프라인입니다.
 ```bash
 pip install -r requirements.txt
 ```
-2. TinyRecursiveModels 준비
-```bash
-git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git TinyRecursiveModels
-```
-3. 데이터 준비
+2. 데이터 준비
 - WebQSP: `data/webqsp/{train.json,dev.json,entities.txt,relations.txt}`
 - CWQ: `data/CWQ/...`
 
@@ -30,3 +26,4 @@ python -m trm_unified.pipeline --help
 
 - `--trm_root` 기본값은 `<repo>/TinyRecursiveModels`입니다.
 - 필요 시 `TRM_ROOT` 환경변수 또는 `--trm_root`로 변경하세요.
+- 기본적으로 저장소에 포함된 `TinyRecursiveModels`(로컬 사용본)를 그대로 사용합니다.

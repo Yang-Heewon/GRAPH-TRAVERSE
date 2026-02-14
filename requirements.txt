@@ -3,3 +3,5 @@ tqdm
 torch
 transformers
 sentencepiece
+einops
+pydantic

@@ -9,10 +9,9 @@ TRM 기반 그래프 경로 추론 파이프라인입니다.
 pip install -r requirements.txt
 ```
 
-2. TinyRecursiveModels 준비
-```bash
-git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git TinyRecursiveModels
-```
+2. TRM 모듈 확인
+- 이 저장소에는 로컬에서 사용 중인 TRM 파이썬 모듈이 `TinyRecursiveModels/`로 함께 포함되어 있습니다.
+- 별도 TRM 저장소를 추가로 clone하지 않아도 됩니다.
 
 3. 데이터 배치
 - `data/webqsp/*` 또는 `data/CWQ/*` 경로에 데이터 파일을 둡니다.

@@ -4,7 +4,8 @@ TRM-RAG 실행 오케스트레이터입니다.
 
 ## 전제
 - 저장소 루트에서 실행
-- `TinyRecursiveModels`가 루트에 존재하거나 `TRM_ROOT` 환경변수로 경로 지정
+- 기본 TRM 모듈은 저장소의 `TinyRecursiveModels`(로컬 사용본)
+- 필요 시 `TRM_ROOT` 환경변수로 다른 경로 지정 가능
 - 데이터 파일이 `data/` 아래 존재
 
 ## 기본 실행
