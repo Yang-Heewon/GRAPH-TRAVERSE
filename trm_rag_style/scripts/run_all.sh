@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-cd /data2/workspace/heewon/논문작업
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
 
 DATASET=${DATASET:-webqsp}
 MODEL_IMPL=${MODEL_IMPL:-trm_hier6}

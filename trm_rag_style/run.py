@@ -7,6 +7,53 @@ from .trm_pipeline import train as trm_train
 from .trm_pipeline import test as trm_test
 
 
+def _resolve_path(base_dir, raw):
+    if not isinstance(raw, str) or not raw:
+        return raw
+    p = os.path.expanduser(os.path.expandvars(raw))
+    if os.path.isabs(p):
+        return p
+    return os.path.abspath(os.path.join(base_dir, p))
+
+
+def normalize_config_paths(cfg):
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    workspace_root = cfg.get('workspace_root') or repo_root
+    workspace_root = _resolve_path(repo_root, workspace_root)
+    cfg['workspace_root'] = workspace_root
+
+    if not cfg.get('trm_root'):
+        cfg['trm_root'] = os.environ.get('TRM_ROOT', 'TinyRecursiveModels')
+
+    path_keys = [
+        'trm_root',
+        'train_in',
+        'dev_in',
+        'test_in',
+        'entities_txt',
+        'relations_txt',
+        'processed_dir',
+        'emb_dir',
+        'ckpt_dir',
+        'train_jsonl',
+        'dev_jsonl',
+        'test_jsonl',
+        'train_json',
+        'dev_json',
+        'eval_json',
+        'entity_emb_npy',
+        'relation_emb_npy',
+        'query_emb_train_npy',
+        'query_emb_dev_npy',
+        'query_emb_eval_npy',
+        'ckpt',
+    ]
+    for k in path_keys:
+        if k in cfg:
+            cfg[k] = _resolve_path(workspace_root, cfg[k])
+    return cfg
+
+
 def enrich_paths(cfg):
     cfg['dataset'] = cfg['dataset'].lower()
     cfg['model_impl'] = cfg['model_impl']
@@ -45,7 +92,9 @@ def main():
     )
     cfg['dataset'] = args.dataset
     cfg['model_impl'] = args.model_impl
+    cfg = normalize_config_paths(cfg)
     cfg = enrich_paths(cfg)
+    cfg = normalize_config_paths(cfg)
 
     stage = args.stage
     if stage in {'preprocess', 'all'}:

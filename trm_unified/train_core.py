@@ -165,6 +165,11 @@ def _setup_ddp():
 
 
 def build_model(model_impl: str, trm_root: str, cfg: dict):
+    if not os.path.isdir(trm_root):
+        raise FileNotFoundError(
+            f"TRM root not found: {trm_root}. "
+            "Set --trm_root or TRM_ROOT to your TinyRecursiveModels path."
+        )
     if trm_root not in os.sys.path:
         os.sys.path.append(trm_root)
     mod = importlib.import_module(f'models.recursive_reasoning.{model_impl}')

@@ -6,6 +6,11 @@ from .embedder import build_embeddings
 from .train_core import train, test
 
 
+def _default_trm_root():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    return os.path.join(repo_root, 'TinyRecursiveModels')
+
+
 def main():
     ap = argparse.ArgumentParser(description='Unified CWQ/WebQSP pipeline')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -33,7 +38,7 @@ def main():
     p1.add_argument('--device', default='cuda')
 
     p2 = sub.add_parser('train')
-    p2.add_argument('--trm_root', default='/data2/workspace/heewon/논문작업/TinyRecursiveModels')
+    p2.add_argument('--trm_root', default=_default_trm_root())
     p2.add_argument('--model_impl', choices=['trm_hier6', 'trm'], default='trm_hier6')
     p2.add_argument('--train_json', required=True)
     p2.add_argument('--entities_txt', required=True)
@@ -76,7 +81,7 @@ def main():
     p2.add_argument('--halt_exploration_prob', type=float, default=0.1)
 
     p3 = sub.add_parser('test')
-    p3.add_argument('--trm_root', default='/data2/workspace/heewon/논문작업/TinyRecursiveModels')
+    p3.add_argument('--trm_root', default=_default_trm_root())
     p3.add_argument('--model_impl', choices=['trm_hier6', 'trm'], default='trm_hier6')
     p3.add_argument('--ckpt', required=True)
     p3.add_argument('--entities_txt', required=True)
