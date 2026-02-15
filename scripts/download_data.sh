@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/portable_env.sh"
+PYTHON_BIN="$(require_python_bin)"
 DATA_DIR="$REPO_ROOT/data"
 TMP_DIR="$DATA_DIR/.downloads"
 
@@ -20,7 +23,7 @@ run_gdown() {
   if have_cmd gdown; then
     gdown "$@"
   else
-    python -m gdown "$@"
+    $PYTHON_BIN -m gdown "$@"
   fi
 }
 
@@ -111,7 +114,7 @@ CWQ_RELATION_IDS_URL="${CWQ_RELATION_IDS_URL:-}"
 
 # 1) Google Drive folder download (default on)
 if [ "$SKIP_GDRIVE" != "1" ] && [ -n "$GDRIVE_FILE_URL$GDRIVE_FOLDER_URL" ]; then
-  if ! have_cmd gdown && ! python -m gdown --help >/dev/null 2>&1; then
+  if ! have_cmd gdown && ! $PYTHON_BIN -m gdown --help >/dev/null 2>&1; then
     echo "[err] gdown not found. Install with: pip install gdown"
     exit 1
   fi

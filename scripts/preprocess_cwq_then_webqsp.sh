@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/portable_env.sh"
+PYTHON_BIN="$(require_python_bin)"
 cd "$REPO_ROOT"
 
 MAX_STEPS="${MAX_STEPS:-4}"
@@ -11,7 +14,7 @@ MINE_MAX_NEIGHBORS="${MINE_MAX_NEIGHBORS:-128}"
 PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
 
 echo "[step] preprocess cwq first (BFS depth=$MAX_STEPS, max_paths=$MAX_PATHS)"
-python -m graph_pipeline.run \
+$PYTHON_BIN -m graph_pipeline.run \
   --dataset cwq \
   --stage preprocess \
   --override \
@@ -21,7 +24,7 @@ python -m graph_pipeline.run \
     preprocess_workers="$PREPROCESS_WORKERS"
 
 echo "[step] preprocess webqsp"
-python -m graph_pipeline.run \
+$PYTHON_BIN -m graph_pipeline.run \
   --dataset webqsp \
   --stage preprocess \
   --override \

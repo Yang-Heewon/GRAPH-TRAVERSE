@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SRC_ROOT="${SRC_ROOT:-/data2/workspace/heewon/agent-rag/data}"
+SRC_ROOT="${SRC_ROOT:-$HOME/agent-rag/data}"
 DATASET="${DATASET:-webqsp}"         # webqsp | cwq | all
 MODE="${MODE:-symlink}"              # symlink | copy
 FORCE="${FORCE:-0}"                  # 1 to overwrite existing targets
@@ -56,7 +56,9 @@ setup_cwq() {
   safe_link_or_copy "$src/relations.txt" "$dst/embeddings_output/CWQ/e5/relation_ids.txt"
 }
 
-case "${DATASET,,}" in
+dataset_lc="$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')"
+
+case "$dataset_lc" in
   webqsp)
     setup_webqsp
     ;;

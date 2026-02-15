@@ -4,8 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/custom_cwq_env.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/portable_env.sh"
+PYTHON_BIN="$(require_python_bin)"
 
-python -m trm_rag_style.run \
+$PYTHON_BIN -m trm_rag_style.run \
   --dataset cwq \
   --stage embed \
   --model_impl "$MODEL_IMPL" \

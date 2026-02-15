@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/portable_env.sh"
+PYTHON_BIN="$(require_python_bin)"
 cd "$REPO_ROOT"
 
 DATASET="${DATASET:-all}"
@@ -19,7 +22,7 @@ if [ "$DATASET" = "all" ]; then
   MAX_STEPS="$MAX_STEPS" MAX_PATHS="$MAX_PATHS" MINE_MAX_NEIGHBORS="$MINE_MAX_NEIGHBORS" \
     bash scripts/preprocess_cwq_then_webqsp.sh
 else
-  python -m graph_pipeline.run \
+  $PYTHON_BIN -m graph_pipeline.run \
     --dataset "$DATASET" \
     --stage preprocess \
     --override \
