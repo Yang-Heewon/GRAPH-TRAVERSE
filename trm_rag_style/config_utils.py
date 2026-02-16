@@ -52,7 +52,7 @@ def default_config_dir() -> str:
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(description='TRM-RAG style orchestrator for TRM pipeline')
+    ap = argparse.ArgumentParser(description='TRM-agent orchestrator for TRM pipeline')
     ap.add_argument('--dataset', choices=['cwq', 'webqsp'], required=True)
     ap.add_argument('--stage', choices=['preprocess', 'embed', 'train', 'test', 'all'], default='all')
     ap.add_argument('--config_dir', default=default_config_dir())

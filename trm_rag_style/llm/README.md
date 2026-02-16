@@ -1,6 +1,6 @@
 # llm module
 
-TRM-RAG 구조 확장을 위해 분리한 placeholder입니다.
+TRM-agent 구조 확장을 위해 분리한 placeholder입니다.
 
 현재는 TRM 기반 학습/평가 파이프라인만 구현되어 있고,
 향후 아래를 추가하면 됩니다.

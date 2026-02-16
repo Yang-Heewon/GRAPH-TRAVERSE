@@ -16,7 +16,7 @@ if [ -z "$CKPT" ]; then
   exit 1
 fi
 
-$PYTHON_BIN -m trm_rag_style.run \
+$PYTHON_BIN -m trm_agent.run \
   --dataset "$DATASET" \
   --model_impl "$MODEL_IMPL" \
   --stage test \

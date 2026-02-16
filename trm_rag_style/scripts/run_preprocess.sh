@@ -8,4 +8,4 @@ PYTHON_BIN="$(require_python_bin)"
 cd "$REPO_ROOT"
 
 DATASET=${DATASET:-webqsp}
-$PYTHON_BIN -m trm_rag_style.run --dataset "$DATASET" --stage preprocess
+$PYTHON_BIN -m trm_agent.run --dataset "$DATASET" --stage preprocess

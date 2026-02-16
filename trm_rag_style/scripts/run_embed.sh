@@ -9,4 +9,7 @@ cd "$REPO_ROOT"
 
 DATASET=${DATASET:-webqsp}
 EMB_MODEL=${EMB_MODEL:-intfloat/multilingual-e5-large}
-$PYTHON_BIN -m trm_rag_style.run --dataset "$DATASET" --stage embed --embedding_model "$EMB_MODEL"
+EMBED_DEVICE=${EMBED_DEVICE:-cuda}
+EMBED_GPUS=${EMBED_GPUS:-}
+$PYTHON_BIN -m trm_agent.run --dataset "$DATASET" --stage embed --embedding_model "$EMB_MODEL" \
+  --override embed_device="$EMBED_DEVICE" embed_gpus="$EMBED_GPUS"

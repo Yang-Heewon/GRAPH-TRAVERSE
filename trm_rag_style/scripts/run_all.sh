@@ -11,7 +11,7 @@ DATASET=${DATASET:-webqsp}
 MODEL_IMPL=${MODEL_IMPL:-trm_hier6}
 EMB_MODEL=${EMB_MODEL:-intfloat/multilingual-e5-large}
 
-$PYTHON_BIN -m trm_rag_style.run \
+$PYTHON_BIN -m trm_agent.run \
   --dataset "$DATASET" \
   --model_impl "$MODEL_IMPL" \
   --embedding_model "$EMB_MODEL" \

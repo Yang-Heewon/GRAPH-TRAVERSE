@@ -3,9 +3,10 @@
 TRM 기반 그래프 경로 추론 파이프라인입니다.
 
 용어 정리(이름을 이해하기 쉽게):
-- `graph_pipeline` (새 별칭): 기존 `trm_rag_style` 실행/오케스트레이션 레이어
+- `trm_agent`: TRM-agent 실행/오케스트레이션 레이어(권장 이름)
+- `trm_agent_pipeline`: 전처리 중심 alias 엔트리포인트
 - `trm_unified`: 실제 전처리/임베딩/학습/평가 코어 엔진
-- 기존 경로(`trm_rag_style`)도 계속 사용 가능
+- 기존 경로(`trm_rag_style`, `graph_pipeline`)도 레거시 호환으로 유지
 
 ## 처음부터 시작하기
 
@@ -30,28 +31,28 @@ bash scripts/setup_and_preprocess.sh
 
 4. 임베딩 생성
 ```bash
-DATASET=webqsp bash trm_rag_style/scripts/run_embed.sh
+DATASET=webqsp bash trm_agent/scripts/run_embed.sh
 ```
 
 5. 학습
 ```bash
-DATASET=webqsp MODEL_IMPL=trm_hier6 bash trm_rag_style/scripts/run_train.sh
+DATASET=webqsp MODEL_IMPL=trm_hier6 bash trm_agent/scripts/run_train.sh
 ```
 - `MODEL_IMPL=trm` 또는 `MODEL_IMPL=trm_hier6`
 
 6. 테스트
 ```bash
-DATASET=webqsp MODEL_IMPL=trm_hier6 CKPT=/path/to/model_ep1.pt bash trm_rag_style/scripts/run_test.sh
+DATASET=webqsp MODEL_IMPL=trm_hier6 CKPT=/path/to/model_ep1.pt bash trm_agent/scripts/run_test.sh
 ```
 
 ## 한 줄 실행 예시
 ```bash
-python -m trm_rag_style.run --dataset webqsp --stage all --model_impl trm_hier6
+python -m trm_agent.run --dataset webqsp --stage all --model_impl trm_hier6
 ```
 
 같은 명령의 쉬운 이름 버전:
 ```bash
-python -m graph_pipeline.run --dataset webqsp --stage all --model_impl trm_hier6
+python -m trm_agent_pipeline.run --dataset webqsp --stage all --model_impl trm_hier6
 ```
 
 ## Repo-Only 로컬 동작 확인(외부 모델 다운로드 없이)
@@ -70,7 +71,7 @@ bash scripts/run_local_demo.sh
 - 필요 시 `TRM_ROOT` 환경변수로 TRM 모듈 경로를 재지정할 수 있습니다.
 - 전처리 BFS 깊이/경로 수 제어 예시:
 ```bash
-python -m trm_rag_style.run \
+python -m trm_agent.run \
   --dataset cwq \
   --stage preprocess \
   --override max_steps=6 max_paths=8 mine_max_neighbors=256

@@ -85,38 +85,38 @@ This guide lists each shell script and how to run it on Linux/macOS/Windows (Git
   - `MODE=symlink|copy`
   - `FORCE=1` to overwrite targets
 
-## trm_rag_style/scripts/run_preprocess.sh
+## trm_agent/scripts/run_preprocess.sh
 
 - Purpose: Preprocess via TRM pipeline.
 - Run:
-  - `bash trm_rag_style/scripts/run_preprocess.sh`
+  - `bash trm_agent/scripts/run_preprocess.sh`
 
-## trm_rag_style/scripts/run_embed.sh
+## trm_agent/scripts/run_embed.sh
 
 - Purpose: Embedding stage via TRM pipeline.
 - Run:
-  - `bash trm_rag_style/scripts/run_embed.sh`
+  - `bash trm_agent/scripts/run_embed.sh`
 
-## trm_rag_style/scripts/run_train.sh
+## trm_agent/scripts/run_train.sh
 
 - Purpose: Distributed training entrypoint (`torchrun`).
 - Run:
-  - `bash trm_rag_style/scripts/run_train.sh`
+  - `bash trm_agent/scripts/run_train.sh`
 - Key env:
   - `TORCHRUN`, `CUDA_VISIBLE_DEVICES`, `DATASET`, `MODEL_IMPL`, `EMB_MODEL`
 
-## trm_rag_style/scripts/run_test.sh
+## trm_agent/scripts/run_test.sh
 
 - Purpose: Evaluate checkpoint.
 - Run:
-  - `CKPT=/path/to/model_epX.pt bash trm_rag_style/scripts/run_test.sh`
+  - `CKPT=/path/to/model_epX.pt bash trm_agent/scripts/run_test.sh`
 - Key env:
   - `DATASET`, `MODEL_IMPL`, `CKPT`
 
-## trm_rag_style/scripts/run_all.sh
+## trm_agent/scripts/run_all.sh
 
 - Purpose: Run all pipeline stages (`stage=all`).
 - Run:
-  - `bash trm_rag_style/scripts/run_all.sh`
+  - `bash trm_agent/scripts/run_all.sh`
 - Key env:
   - `DATASET`, `MODEL_IMPL`, `EMB_MODEL`

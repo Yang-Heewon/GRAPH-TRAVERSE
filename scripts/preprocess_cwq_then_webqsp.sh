@@ -14,7 +14,7 @@ MINE_MAX_NEIGHBORS="${MINE_MAX_NEIGHBORS:-128}"
 PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
 
 echo "[step] preprocess cwq first (BFS depth=$MAX_STEPS, max_paths=$MAX_PATHS)"
-$PYTHON_BIN -m graph_pipeline.run \
+$PYTHON_BIN -m trm_agent_pipeline.run \
   --dataset cwq \
   --stage preprocess \
   --override \
@@ -24,7 +24,7 @@ $PYTHON_BIN -m graph_pipeline.run \
     preprocess_workers="$PREPROCESS_WORKERS"
 
 echo "[step] preprocess webqsp"
-$PYTHON_BIN -m graph_pipeline.run \
+$PYTHON_BIN -m trm_agent_pipeline.run \
   --dataset webqsp \
   --stage preprocess \
   --override \

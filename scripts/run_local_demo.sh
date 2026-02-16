@@ -10,7 +10,7 @@ cd "$ROOT_DIR"
 
 $PYTHON_BIN scripts/make_demo_webqsp.py
 
-$PYTHON_BIN -m trm_rag_style.run \
+$PYTHON_BIN -m trm_agent.run \
   --dataset webqsp \
   --stage all \
   --model_impl trm_hier6 \
@@ -30,8 +30,8 @@ $PYTHON_BIN -m trm_rag_style.run \
     eval_limit=20 \
     debug_eval_n=1
 
-CKPT_PATH="$(ls -1 trm_rag_style/ckpt/webqsp_trm_hier6/model_ep*.pt | tail -n 1)"
-$PYTHON_BIN -m trm_rag_style.run \
+CKPT_PATH="$(ls -1 trm_agent/ckpt/webqsp_trm_hier6/model_ep*.pt | tail -n 1)"
+$PYTHON_BIN -m trm_agent.run \
   --dataset webqsp \
   --stage test \
   --model_impl trm_hier6 \

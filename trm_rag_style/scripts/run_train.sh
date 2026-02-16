@@ -10,7 +10,7 @@ MODEL_IMPL=${MODEL_IMPL:-trm_hier6}
 EMB_MODEL=${EMB_MODEL:-intfloat/multilingual-e5-large}
 
 TORCHRUN=${TORCHRUN:-torchrun}
-$TORCHRUN --nproc_per_node=3 --master_port=29500 -m trm_rag_style.run \
+$TORCHRUN --nproc_per_node=3 --master_port=29500 -m trm_agent.run \
   --dataset "$DATASET" \
   --model_impl "$MODEL_IMPL" \
   --embedding_model "$EMB_MODEL" \

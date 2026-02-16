@@ -1,2 +1,1 @@
-"""Friendly alias package for the TRM pipeline runner."""
-
+"""Legacy alias package for the TRM-agent runner."""

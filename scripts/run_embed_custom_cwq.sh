@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/custom_cwq_env.sh"
 source "$SCRIPT_DIR/lib/portable_env.sh"
 PYTHON_BIN="$(require_python_bin)"
 
-$PYTHON_BIN -m trm_rag_style.run \
+$PYTHON_BIN -m trm_agent.run \
   --dataset cwq \
   --stage embed \
   --model_impl "$MODEL_IMPL" \

@@ -20,7 +20,7 @@ EMB_MODEL="${EMB_MODEL:-intfloat/multilingual-e5-large}"     # local-hash or HF 
 EMB_TAG="${EMB_TAG:-cwq_custom}"
 RUN_ID="${RUN_ID:-cwq_custom}"
 
-PROC_DIR="$ROOT_DIR/trm_rag_style/processed/${RUN_ID}"
-EMB_DIR="$ROOT_DIR/trm_rag_style/emb/${RUN_ID}_${EMB_TAG}"
-CKPT_DIR="$ROOT_DIR/trm_rag_style/ckpt/${RUN_ID}_${MODEL_IMPL}"
+PROC_DIR="$ROOT_DIR/trm_agent/processed/${RUN_ID}"
+EMB_DIR="$ROOT_DIR/trm_agent/emb/${RUN_ID}_${EMB_TAG}"
+CKPT_DIR="$ROOT_DIR/trm_agent/ckpt/${RUN_ID}_${MODEL_IMPL}"
 ENTITY_TEXT_OUT="$ROOT_DIR/data/${RUN_ID}_entity_text.txt"

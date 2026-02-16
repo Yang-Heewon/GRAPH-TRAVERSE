@@ -57,10 +57,28 @@ def normalize_config_paths(cfg):
 def enrich_paths(cfg):
     cfg['dataset'] = cfg['dataset'].lower()
     cfg['model_impl'] = cfg['model_impl']
+    had_processed_dir = 'processed_dir' in cfg
+    had_emb_dir = 'emb_dir' in cfg
+    had_ckpt_dir = 'ckpt_dir' in cfg
 
-    cfg.setdefault('processed_dir', os.path.join(cfg['workspace_root'], 'trm_rag_style', 'processed', cfg['dataset']))
-    cfg.setdefault('emb_dir', os.path.join(cfg['workspace_root'], 'trm_rag_style', 'emb', f"{cfg['dataset']}_{cfg['emb_tag']}"))
-    cfg.setdefault('ckpt_dir', os.path.join(cfg['workspace_root'], 'trm_rag_style', 'ckpt', f"{cfg['dataset']}_{cfg['model_impl']}"))
+    cfg.setdefault('processed_dir', os.path.join(cfg['workspace_root'], 'trm_agent', 'processed', cfg['dataset']))
+    cfg.setdefault('emb_dir', os.path.join(cfg['workspace_root'], 'trm_agent', 'emb', f"{cfg['dataset']}_{cfg['emb_tag']}"))
+    cfg.setdefault('ckpt_dir', os.path.join(cfg['workspace_root'], 'trm_agent', 'ckpt', f"{cfg['dataset']}_{cfg['model_impl']}"))
+
+    # Backward compatibility: if new default dirs do not exist, transparently
+    # reuse legacy trm_rag_style outputs.
+    if not had_processed_dir and not os.path.exists(cfg['processed_dir']):
+        legacy_processed = os.path.join(cfg['workspace_root'], 'trm_rag_style', 'processed', cfg['dataset'])
+        if os.path.exists(legacy_processed):
+            cfg['processed_dir'] = legacy_processed
+    if not had_emb_dir and not os.path.exists(cfg['emb_dir']):
+        legacy_emb = os.path.join(cfg['workspace_root'], 'trm_rag_style', 'emb', f"{cfg['dataset']}_{cfg['emb_tag']}")
+        if os.path.exists(legacy_emb):
+            cfg['emb_dir'] = legacy_emb
+    if not had_ckpt_dir and not os.path.exists(cfg['ckpt_dir']):
+        legacy_ckpt = os.path.join(cfg['workspace_root'], 'trm_rag_style', 'ckpt', f"{cfg['dataset']}_{cfg['model_impl']}")
+        if os.path.exists(legacy_ckpt):
+            cfg['ckpt_dir'] = legacy_ckpt
 
     cfg['train_jsonl'] = os.path.join(cfg['processed_dir'], 'train.jsonl')
     cfg['dev_jsonl'] = os.path.join(cfg['processed_dir'], 'dev.jsonl')
