@@ -4,10 +4,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-0,1,2}
 DATASET=${DATASET:-webqsp}
 MODEL_IMPL=${MODEL_IMPL:-trm_hier6}
 EMB_MODEL=${EMB_MODEL:-intfloat/multilingual-e5-large}
+CKPT=${CKPT:-}
+CKPT_DIR=${CKPT_DIR:-trm_rag_style/ckpt/${DATASET}_${MODEL_IMPL}}
 EPOCHS=${EPOCHS:-5}
 BATCH_SIZE=${BATCH_SIZE:-8}
 LR=${LR:-1e-4}
@@ -30,8 +32,29 @@ EVAL_START_TOPK=${EVAL_START_TOPK:-5}
 EVAL_PRED_TOPK=${EVAL_PRED_TOPK:-5}
 EVAL_USE_HALT=${EVAL_USE_HALT:-true}
 EVAL_MIN_HOPS_BEFORE_STOP=${EVAL_MIN_HOPS_BEFORE_STOP:-2}
+ENDPOINT_LOSS_MODE=${ENDPOINT_LOSS_MODE:-metric_align_main}
+RELATION_AUX_WEIGHT=${RELATION_AUX_WEIGHT:-0.2}
 ENDPOINT_AUX_WEIGHT=${ENDPOINT_AUX_WEIGHT:-0.2}
+METRIC_ALIGN_AUX_WEIGHT=${METRIC_ALIGN_AUX_WEIGHT:-0.0}
 HALT_AUX_WEIGHT=${HALT_AUX_WEIGHT:-0.1}
+PHASE2_START_EPOCH=${PHASE2_START_EPOCH:-0}
+PHASE2_ENDPOINT_LOSS_MODE=${PHASE2_ENDPOINT_LOSS_MODE:-}
+PHASE2_RELATION_AUX_WEIGHT=${PHASE2_RELATION_AUX_WEIGHT:-}
+PHASE2_ENDPOINT_AUX_WEIGHT=${PHASE2_ENDPOINT_AUX_WEIGHT:-}
+PHASE2_METRIC_ALIGN_AUX_WEIGHT=${PHASE2_METRIC_ALIGN_AUX_WEIGHT:-}
+PHASE2_HALT_AUX_WEIGHT=${PHASE2_HALT_AUX_WEIGHT:-}
+PHASE2_AUTO_ENABLED=${PHASE2_AUTO_ENABLED:-false}
+PHASE2_AUTO_METRIC=${PHASE2_AUTO_METRIC:-dev_f1}
+PHASE2_AUTO_THRESHOLD=${PHASE2_AUTO_THRESHOLD:-}
+PHASE2_AUTO_PATIENCE=${PHASE2_AUTO_PATIENCE:-0}
+PHASE2_AUTO_MIN_EPOCH=${PHASE2_AUTO_MIN_EPOCH:-1}
+PHASE2_AUTO_MIN_DELTA=${PHASE2_AUTO_MIN_DELTA:-0.001}
+PHASE2_RL_REWARD_METRIC=${PHASE2_RL_REWARD_METRIC:-f1}
+PHASE2_RL_ENTROPY_WEIGHT=${PHASE2_RL_ENTROPY_WEIGHT:-0.0}
+PHASE2_RL_SAMPLE_TEMP=${PHASE2_RL_SAMPLE_TEMP:-1.0}
+PHASE2_RL_USE_GREEDY_BASELINE=${PHASE2_RL_USE_GREEDY_BASELINE:-true}
+PHASE2_RL_NO_CYCLE=${PHASE2_RL_NO_CYCLE:-true}
+PHASE2_RL_ADV_CLIP=${PHASE2_RL_ADV_CLIP:-}
 ORACLE_DIAG_ENABLED=${ORACLE_DIAG_ENABLED:-true}
 ORACLE_DIAG_LIMIT=${ORACLE_DIAG_LIMIT:-500}
 ORACLE_DIAG_FAIL_THRESHOLD=${ORACLE_DIAG_FAIL_THRESHOLD:--1}
@@ -41,14 +64,19 @@ WANDB_PROJECT=${WANDB_PROJECT:-graph-traverse}
 WANDB_ENTITY=${WANDB_ENTITY:-}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 DDP_FIND_UNUSED=${DDP_FIND_UNUSED:-true}
+FREEZE_LM_HEAD=${FREEZE_LM_HEAD:-true}
 
 TORCHRUN=${TORCHRUN:-torchrun}
-$TORCHRUN --nproc_per_node=3 --master_port=29500 -m trm_agent.run \
+MASTER_PORT=${MASTER_PORT:-29500}
+NPROC_PER_NODE=${NPROC_PER_NODE:-3}
+$TORCHRUN --nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT" -m trm_agent.run \
   --dataset "$DATASET" \
   --model_impl "$MODEL_IMPL" \
   --embedding_model "$EMB_MODEL" \
   --stage train \
   --override \
+    ckpt="$CKPT" \
+    ckpt_dir="$CKPT_DIR" \
     epochs="$EPOCHS" \
     batch_size="$BATCH_SIZE" \
     lr="$LR" \
@@ -71,13 +99,35 @@ $TORCHRUN --nproc_per_node=3 --master_port=29500 -m trm_agent.run \
     eval_pred_topk="$EVAL_PRED_TOPK" \
     eval_use_halt="$EVAL_USE_HALT" \
     eval_min_hops_before_stop="$EVAL_MIN_HOPS_BEFORE_STOP" \
+    endpoint_loss_mode="$ENDPOINT_LOSS_MODE" \
+    relation_aux_weight="$RELATION_AUX_WEIGHT" \
     endpoint_aux_weight="$ENDPOINT_AUX_WEIGHT" \
+    metric_align_aux_weight="$METRIC_ALIGN_AUX_WEIGHT" \
     halt_aux_weight="$HALT_AUX_WEIGHT" \
+    phase2_start_epoch="$PHASE2_START_EPOCH" \
+    phase2_endpoint_loss_mode="$PHASE2_ENDPOINT_LOSS_MODE" \
+    phase2_relation_aux_weight="$PHASE2_RELATION_AUX_WEIGHT" \
+    phase2_endpoint_aux_weight="$PHASE2_ENDPOINT_AUX_WEIGHT" \
+    phase2_metric_align_aux_weight="$PHASE2_METRIC_ALIGN_AUX_WEIGHT" \
+    phase2_halt_aux_weight="$PHASE2_HALT_AUX_WEIGHT" \
+    phase2_auto_enabled="$PHASE2_AUTO_ENABLED" \
+    phase2_auto_metric="$PHASE2_AUTO_METRIC" \
+    phase2_auto_threshold="$PHASE2_AUTO_THRESHOLD" \
+    phase2_auto_patience="$PHASE2_AUTO_PATIENCE" \
+    phase2_auto_min_epoch="$PHASE2_AUTO_MIN_EPOCH" \
+    phase2_auto_min_delta="$PHASE2_AUTO_MIN_DELTA" \
+    phase2_rl_reward_metric="$PHASE2_RL_REWARD_METRIC" \
+    phase2_rl_entropy_weight="$PHASE2_RL_ENTROPY_WEIGHT" \
+    phase2_rl_sample_temp="$PHASE2_RL_SAMPLE_TEMP" \
+    phase2_rl_use_greedy_baseline="$PHASE2_RL_USE_GREEDY_BASELINE" \
+    phase2_rl_no_cycle="$PHASE2_RL_NO_CYCLE" \
+    phase2_rl_adv_clip="$PHASE2_RL_ADV_CLIP" \
     oracle_diag_enabled="$ORACLE_DIAG_ENABLED" \
     oracle_diag_limit="$ORACLE_DIAG_LIMIT" \
     oracle_diag_fail_threshold="$ORACLE_DIAG_FAIL_THRESHOLD" \
     oracle_diag_only="$ORACLE_DIAG_ONLY" \
     ddp_find_unused="$DDP_FIND_UNUSED" \
+    freeze_lm_head="$FREEZE_LM_HEAD" \
     wandb_mode="$WANDB_MODE" \
     wandb_project="$WANDB_PROJECT" \
     wandb_entity="$WANDB_ENTITY" \

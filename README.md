@@ -69,6 +69,16 @@ ORACLE_DIAG_ONLY=true ORACLE_DIAG_LIMIT=-1 \
 bash trm_agent/scripts/run_train.sh
 ```
 
+- 논문작업 스타일 초기학습(phase1, relation CE 중심)으로 시작:
+```bash
+cd /data2/workspace/heewon/GRAPH-TRAVERSE
+DATASET=cwq TRAIN_PATH_POLICY=all TRAIN_SHORTEST_K=1 \
+bash trm_rag_style/scripts/run_preprocess.sh
+
+DATASET=cwq WANDB_MODE=online WANDB_ENTITY=heewon6205-chung-ang-university \
+bash trm_rag_style/scripts/run_train_phase1_paperstyle_wandb.sh
+```
+
 6. 테스트
 ```bash
 DATASET=webqsp MODEL_IMPL=trm_hier6 CKPT=/path/to/model_ep1.pt bash trm_agent/scripts/run_test.sh

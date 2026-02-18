@@ -26,7 +26,21 @@ def _setup_wandb(args, is_main: bool):
     if mode in {"off", "false", "none", "disabled", "disable"}:
         return None
     try:
+        import importlib
+        import sys
         import wandb  # type: ignore
+        if not hasattr(wandb, "init"):
+            # Local `./wandb` directory can shadow the pip package.
+            sys.modules.pop("wandb", None)
+            cwd = os.getcwd()
+            old_path = list(sys.path)
+            try:
+                sys.path = [p for p in sys.path if p not in {"", cwd}]
+                wandb = importlib.import_module("wandb")
+            finally:
+                sys.path = old_path
+        if not hasattr(wandb, "init"):
+            raise AttributeError("imported wandb module does not provide init()")
     except Exception as e:
         print(f"[warn] wandb import failed: {e}; continue without wandb logging")
         return None
@@ -151,6 +165,31 @@ def make_collate(
         memo[key] = False
         return False
 
+    def _shortest_dist_to_goals(adj, goals: set, max_dist: int):
+        rev = {}
+        for s, edges in adj.items():
+            ss = int(s)
+            for _, o in edges:
+                oo = int(o)
+                rev.setdefault(oo, []).append(ss)
+        dist = {}
+        q = deque()
+        for g in goals:
+            gg = int(g)
+            dist[gg] = 0
+            q.append(gg)
+        while q:
+            cur = q.popleft()
+            d = dist[cur]
+            if d >= max_dist:
+                continue
+            for prv in rev.get(cur, []):
+                if prv in dist:
+                    continue
+                dist[prv] = d + 1
+                q.append(prv)
+        return dist
+
     def _fn(batch):
         toks = tok([b['q_text'] for b in batch], padding=True, truncation=True, max_length=max_q_len, return_tensors='pt')
         sample_ctx = []
@@ -162,20 +201,21 @@ def make_collate(
                 qi = b['ex_line'] if b['ex_line'] < q_mem.shape[0] else 0
                 q_emb = np.asarray(q_mem[qi], dtype=np.float32)
             gold_set = set(int(x) for x in b.get('answers_cid', []))
-            sample_ctx.append((adj, q_emb, gold_set, {}))
+            dist_to_goal = _shortest_dist_to_goals(adj, gold_set, max_steps) if gold_set else {}
+            sample_ctx.append((adj, q_emb, gold_set, {}, dist_to_goal))
 
         seq_batches = []
         for t in range(max_steps):
-            puzs, rels, labels, cmask, vmask, endpoint_targets = [], [], [], [], [], []
+            puzs, rels, labels, cmask, vmask, endpoint_targets, policy_targets = [], [], [], [], [], [], []
             for i, b in enumerate(batch):
                 segs = b['path_segments']
                 idx = t * 2
                 if idx + 2 >= len(segs):
-                    puzs.append([0]); rels.append([0]); labels.append(-100); cmask.append([False]); vmask.append(False); endpoint_targets.append([0.0])
+                    puzs.append([0]); rels.append([0]); labels.append(-100); cmask.append([False]); vmask.append(False); endpoint_targets.append([0.0]); policy_targets.append([0.0])
                     continue
                 cur = int(segs[idx])
                 gold_r = int(segs[idx + 1])
-                adj, q_emb, gold_set, reach_memo = sample_ctx[i]
+                adj, q_emb, gold_set, reach_memo, dist_to_goal = sample_ctx[i]
                 edges = adj.get(cur, [])
                 if max_neighbors > 0 and len(edges) > max_neighbors:
                     edges = edges[:max_neighbors]
@@ -198,6 +238,19 @@ def make_collate(
                 labels.append(rel_cands.index(gold_r))
                 cmask.append([True] * len(rel_cands))
                 vmask.append(True)
+                cur_dist = dist_to_goal.get(int(cur), None)
+                remain = max_steps - t
+                pos_rels_policy = set()
+                if cur_dist is not None and cur_dist > 0 and cur_dist <= remain:
+                    for r, nxt in edges:
+                        rr = int(r)
+                        dn = dist_to_goal.get(int(nxt), None)
+                        if dn is not None and dn == cur_dist - 1:
+                            pos_rels_policy.add(rr)
+                pt_row = [1.0 if rr in pos_rels_policy else 0.0 for rr in rel_cands]
+                if sum(pt_row) <= 0.0:
+                    pt_row[rel_cands.index(gold_r)] = 1.0
+                policy_targets.append(pt_row)
                 if endpoint_aux:
                     rem_steps = max(0, max_steps - (t + 1))
                     pos_rels = set()
@@ -219,17 +272,20 @@ def make_collate(
             rt = torch.zeros((B, cmax), dtype=torch.long)
             mt = torch.zeros((B, cmax), dtype=torch.bool)
             et = torch.zeros((B, cmax), dtype=torch.float32)
+            ptt = torch.zeros((B, cmax), dtype=torch.float32)
             for k in range(B):
                 L = len(puzs[k])
                 pt[k, :L] = torch.tensor(puzs[k], dtype=torch.long)
                 rt[k, :L] = torch.tensor(rels[k], dtype=torch.long)
                 mt[k, :L] = torch.tensor(cmask[k], dtype=torch.bool)
                 et[k, :L] = torch.tensor(endpoint_targets[k], dtype=torch.float32)
+                ptt[k, :L] = torch.tensor(policy_targets[k], dtype=torch.float32)
             seq_batches.append({
                 'puzzle_identifiers': pt,
                 'relation_identifiers': rt,
                 'candidate_mask': mt,
                 'endpoint_targets': et,
+                'policy_targets': ptt,
                 'labels': torch.tensor(labels, dtype=torch.long),
                 'valid_mask': torch.tensor(vmask, dtype=torch.bool),
             })
@@ -249,7 +305,24 @@ def make_collate(
             seq_batches[t]['halt_targets'] = halt_targets
             seq_batches[t]['halt_mask'] = halt_mask
 
-        return {'input_ids': toks['input_ids'], 'attention_mask': toks['attention_mask'], 'seq_batches': seq_batches}
+        rl_q = np.stack([ctx[1] for ctx in sample_ctx], axis=0).astype(np.float32)
+        rl_starts = []
+        rl_gold = []
+        rl_tuples = []
+        for b in batch:
+            segs = b.get('path_segments', [])
+            rl_starts.append(int(segs[0]) if len(segs) > 0 else 0)
+            rl_gold.append([int(x) for x in b.get('answers_cid', [])])
+            rl_tuples.append(b.get('tuples', []))
+        return {
+            'input_ids': toks['input_ids'],
+            'attention_mask': toks['attention_mask'],
+            'seq_batches': seq_batches,
+            'rl_tuples': rl_tuples,
+            'rl_start_nodes': rl_starts,
+            'rl_gold_answers': rl_gold,
+            'rl_q_embs': torch.tensor(rl_q, dtype=torch.float32),
+        }
 
     return _fn
 
@@ -870,6 +943,9 @@ def train(args):
     model, carry_cls = build_model(args.model_impl, args.trm_root, cfg)
     model.inner.puzzle_emb_data = ent_mem
     model.inner.relation_emb_data = rel_mem
+    if bool(getattr(args, 'freeze_lm_head', True)):
+        for p in model.inner.lm_head.parameters():
+            p.requires_grad = False
 
     if args.ckpt and os.path.exists(args.ckpt):
         sd = torch.load(args.ckpt, map_location='cpu')
@@ -941,7 +1017,71 @@ def train(args):
         return
 
     ds = PathDataset(args.train_json, args.max_steps)
+
+    def _parse_optional_float(v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip().lower()
+        if s in {"", "none", "null", "nan"}:
+            return None
+        return float(v)
+
+    def _parse_optional_int(v):
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return int(v)
+        s = str(v).strip().lower()
+        if s in {"", "none", "null", "nan"}:
+            return None
+        return int(v)
+
     endpoint_aux_weight = float(getattr(args, 'endpoint_aux_weight', 0.0))
+    metric_align_aux_weight = float(getattr(args, 'metric_align_aux_weight', getattr(args, 'policy_aux_weight', 0.0)))
+    endpoint_loss_mode = str(getattr(args, 'endpoint_loss_mode', 'aux')).strip().lower()
+    relation_aux_weight = float(getattr(args, 'relation_aux_weight', 1.0))
+    halt_aux_weight = float(getattr(args, 'halt_aux_weight', 0.0))
+
+    phase2_start_epoch = int(getattr(args, 'phase2_start_epoch', 0))
+    phase2_endpoint_loss_mode = str(getattr(args, 'phase2_endpoint_loss_mode', '')).strip().lower()
+    phase2_relation_aux_weight = _parse_optional_float(getattr(args, 'phase2_relation_aux_weight', None))
+    phase2_endpoint_aux_weight = _parse_optional_float(getattr(args, 'phase2_endpoint_aux_weight', None))
+    phase2_metric_align_aux_weight = _parse_optional_float(getattr(args, 'phase2_metric_align_aux_weight', None))
+    phase2_halt_aux_weight = _parse_optional_float(getattr(args, 'phase2_halt_aux_weight', None))
+    phase2_auto_enabled = bool(getattr(args, 'phase2_auto_enabled', False))
+    phase2_auto_metric = str(getattr(args, 'phase2_auto_metric', 'dev_f1')).strip().lower()
+    phase2_auto_threshold = _parse_optional_float(getattr(args, 'phase2_auto_threshold', None))
+    phase2_auto_patience = int(_parse_optional_int(getattr(args, 'phase2_auto_patience', 0)) or 0)
+    phase2_auto_min_epoch = int(_parse_optional_int(getattr(args, 'phase2_auto_min_epoch', 1)) or 1)
+    phase2_auto_min_delta = float(getattr(args, 'phase2_auto_min_delta', 1e-4))
+    phase2_rl_reward_metric = str(getattr(args, 'phase2_rl_reward_metric', 'f1')).strip().lower()
+    phase2_rl_entropy_weight = float(getattr(args, 'phase2_rl_entropy_weight', 0.0))
+    phase2_rl_sample_temp = float(getattr(args, 'phase2_rl_sample_temp', 1.0))
+    phase2_rl_use_greedy_baseline = bool(getattr(args, 'phase2_rl_use_greedy_baseline', True))
+    phase2_rl_no_cycle = bool(getattr(args, 'phase2_rl_no_cycle', getattr(args, 'eval_no_cycle', False)))
+    phase2_rl_adv_clip = _parse_optional_float(getattr(args, 'phase2_rl_adv_clip', None))
+    if phase2_auto_metric not in {'dev_f1', 'dev_hit1', 'train_acc', 'train_loss'}:
+        phase2_auto_metric = 'dev_f1'
+    if phase2_rl_reward_metric not in {'f1', 'hit1', 'hit'}:
+        phase2_rl_reward_metric = 'f1'
+    if phase2_rl_sample_temp <= 0.0:
+        phase2_rl_sample_temp = 1.0
+    phase2_auto_active = False
+    phase2_auto_bad_count = 0
+    phase2_auto_best = None
+
+    endpoint_main_modes = {'main', 'endpoint_main', 'endpoint-first', 'endpoint_first'}
+    rl_scst_modes = {'rl_scst', 'scst', 'reinforce', 'policy_gradient'}
+    metric_align_main_modes = {
+        'metric_align_main',
+        'metric_main',
+        'policy_main',
+        'hitf1_main',
+        'align_main',
+    }
+
     collate = make_collate(
         args.trm_tokenizer,
         args.relation_emb_npy,
@@ -951,22 +1091,153 @@ def train(args):
         args.prune_rand,
         args.max_q_len,
         args.max_steps,
-        endpoint_aux=endpoint_aux_weight > 0.0,
+        endpoint_aux=True,
         entity_vocab_size=int(ent_mem.shape[0]),
     )
     sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if is_ddp else None
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=args.num_workers, drop_last=True, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=(args.num_workers > 0))
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable_params, lr=args.lr)
     ce = nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     bce_endpoint = nn.BCEWithLogitsLoss(reduction='none')
-    bce_halt = nn.BCEWithLogitsLoss(reduction='none')
-    halt_aux_weight = float(getattr(args, 'halt_aux_weight', 0.0))
+    ce_halt = nn.CrossEntropyLoss(reduction='none')
+    last_phase2_state = None
+
+    def _rl_reward_from_pred(pred_node: int, gold_set: set, metric: str) -> float:
+        if not gold_set:
+            return 0.0
+        hit = 1.0 if int(pred_node) in gold_set else 0.0
+        if metric in {'hit', 'hit1'}:
+            return hit
+        if hit <= 0.0:
+            return 0.0
+        precision = 1.0
+        recall = 1.0 / float(max(1, len(gold_set)))
+        return float((2.0 * precision * recall) / max(1e-12, precision + recall))
+
+    def _rollout_single_policy(
+        input_ids_1,
+        attn_1,
+        adj: dict,
+        start_node: int,
+        q_emb_np: np.ndarray,
+        sample_action: bool,
+        no_cycle: bool,
+        temperature: float,
+        with_grad: bool,
+    ):
+        ctx = torch.enable_grad() if with_grad else torch.no_grad()
+        with ctx:
+            carry_1 = carry_init_fn({'input_ids': input_ids_1}, device)
+            cur = int(start_node)
+            visited = {cur}
+            logprob_sum = torch.zeros((), device=device, requires_grad=with_grad)
+            entropy_sum = torch.zeros((), device=device, requires_grad=with_grad)
+            taken = 0
+            for _ in range(int(args.max_steps)):
+                edges = adj.get(cur, [])
+                if int(args.max_neighbors) > 0 and len(edges) > int(args.max_neighbors):
+                    edges = edges[:int(args.max_neighbors)]
+                if no_cycle:
+                    edges = [(r, n) for r, n in edges if int(n) not in visited]
+                if not edges:
+                    break
+                rel_cands = []
+                seen_rel = set()
+                for r, _ in edges:
+                    rr = int(r)
+                    if rr not in seen_rel:
+                        seen_rel.add(rr)
+                        rel_cands.append(rr)
+                rel_cands = prune_rel_mix_cpu(
+                    q_emb_np,
+                    rel_cands,
+                    rel_mem,
+                    int(args.prune_keep),
+                    int(args.prune_rand),
+                )
+                if not rel_cands:
+                    break
+                cur_pid = int(cur)
+                if cur_pid < 0 or cur_pid >= int(ent_mem.shape[0]):
+                    cur_pid = 0
+                p_ids = torch.full((1, len(rel_cands)), cur_pid, dtype=torch.long, device=device)
+                r_ids = torch.tensor([rel_cands], dtype=torch.long, device=device)
+                c_mask = torch.ones_like(r_ids, dtype=torch.bool)
+                carry_1, out = model(
+                    carry_1,
+                    {
+                        'input_ids': input_ids_1,
+                        'attention_mask': attn_1,
+                        'puzzle_identifiers': p_ids,
+                        'relation_identifiers': r_ids,
+                        'candidate_mask': c_mask,
+                    },
+                )
+                logits_1 = out['scores'][0].masked_fill(~c_mask[0], -1e4)
+                logits_1 = logits_1 / float(temperature)
+                logp_1 = torch.log_softmax(logits_1, dim=0)
+                prob_1 = torch.softmax(logits_1, dim=0)
+                entropy_sum = entropy_sum + (-(prob_1 * logp_1).sum())
+                if sample_action:
+                    idx = int(torch.multinomial(prob_1, num_samples=1).item())
+                else:
+                    idx = int(torch.argmax(logp_1).item())
+                logprob_sum = logprob_sum + logp_1[idx]
+                r_sel = int(rel_cands[idx])
+                next_nodes = []
+                seen_nodes = set()
+                for rr, nn in edges:
+                    if int(rr) == r_sel and int(nn) not in seen_nodes:
+                        seen_nodes.add(int(nn))
+                        next_nodes.append(int(nn))
+                if not next_nodes:
+                    break
+                if sample_action and len(next_nodes) > 1:
+                    nxt = int(next_nodes[np.random.randint(0, len(next_nodes))])
+                else:
+                    nxt = int(next_nodes[0])
+                cur = nxt
+                visited.add(cur)
+                taken += 1
+            return logprob_sum, entropy_sum, int(cur), int(taken)
 
     for ep in range(1, args.epochs + 1):
         if sampler is not None:
             sampler.set_epoch(ep)
         model.train()
+        use_phase2 = (phase2_start_epoch > 0 and ep >= phase2_start_epoch) or phase2_auto_active
+        cur_endpoint_loss_mode = endpoint_loss_mode
+        cur_relation_aux_weight = relation_aux_weight
+        cur_endpoint_aux_weight = endpoint_aux_weight
+        cur_metric_align_aux_weight = metric_align_aux_weight
+        cur_halt_aux_weight = halt_aux_weight
+        if use_phase2:
+            if phase2_endpoint_loss_mode:
+                cur_endpoint_loss_mode = phase2_endpoint_loss_mode
+            if phase2_relation_aux_weight is not None:
+                cur_relation_aux_weight = phase2_relation_aux_weight
+            if phase2_endpoint_aux_weight is not None:
+                cur_endpoint_aux_weight = phase2_endpoint_aux_weight
+            if phase2_metric_align_aux_weight is not None:
+                cur_metric_align_aux_weight = phase2_metric_align_aux_weight
+            if phase2_halt_aux_weight is not None:
+                cur_halt_aux_weight = phase2_halt_aux_weight
+        cur_endpoint_main_mode = cur_endpoint_loss_mode in endpoint_main_modes
+        cur_metric_align_main_mode = cur_endpoint_loss_mode in metric_align_main_modes
+        cur_endpoint_enabled = cur_endpoint_main_mode or (cur_endpoint_aux_weight > 0.0)
+        cur_metric_align_enabled = cur_metric_align_main_mode or (cur_metric_align_aux_weight > 0.0)
+        if is_main and (ep == 1 or last_phase2_state is None or bool(use_phase2) != bool(last_phase2_state)):
+            print(
+                "[TrainObjective] "
+                f"ep={ep} mode={cur_endpoint_loss_mode} "
+                f"rel_aux={cur_relation_aux_weight:.4f} "
+                f"endpoint_aux={cur_endpoint_aux_weight:.4f} "
+                f"metric_align_aux={cur_metric_align_aux_weight:.4f} "
+                f"halt_aux={cur_halt_aux_weight:.4f}"
+            )
+        last_phase2_state = bool(use_phase2)
         pbar = tqdm(loader, disable=not is_main, desc=f'Ep {ep}')
         tot_loss = 0.0
         tot_correct = 0
@@ -975,40 +1246,141 @@ def train(args):
         for batch in pbar:
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             attn = batch['attention_mask'].to(device, non_blocking=True)
-            carry = carry_init_fn({'input_ids': input_ids}, device)
             opt.zero_grad(set_to_none=True)
             bl = torch.zeros((), device=device)
-            T = len(batch['seq_batches'])
-            for t, step in enumerate(batch['seq_batches']):
-                p_ids = step['puzzle_identifiers'].to(device)
-                r_ids = step['relation_identifiers'].to(device)
-                c_mask = step['candidate_mask'].to(device)
-                endpoint_t = step['endpoint_targets'].to(device)
-                halt_t = step['halt_targets'].to(device)
-                halt_m = step['halt_mask'].to(device)
-                labels = step['labels'].to(device)
-                v_mask = step['valid_mask'].to(device)
-                carry, out = model(carry, {'input_ids': input_ids, 'attention_mask': attn, 'puzzle_identifiers': p_ids, 'relation_identifiers': r_ids, 'candidate_mask': c_mask})
-                logits = out['scores'].masked_fill(~c_mask, -1e4)
-                lv = ce(logits, labels).masked_fill(~v_mask, 0.0)
-                valid = v_mask & (labels >= 0)
-                if valid.any():
-                    pred = torch.argmax(logits, dim=1)
-                    tot_correct += int((pred[valid] == labels[valid]).sum().item())
-                    tot_count += int(valid.sum().item())
-                sc = v_mask.sum().clamp(min=1)
-                step_loss = lv.sum() / sc
-                if endpoint_aux_weight > 0.0:
-                    ev = bce_endpoint(logits, endpoint_t).masked_fill(~c_mask, 0.0)
-                    ev = ev.sum(dim=1) / c_mask.sum(dim=1).clamp(min=1).float()
-                    ev = ev.masked_fill(~v_mask, 0.0)
-                    step_loss = step_loss + endpoint_aux_weight * (ev.sum() / sc)
-                if halt_aux_weight > 0.0:
-                    halt_logits = out['q_halt_logits'].to(torch.float32)
-                    halt_vec = bce_halt(halt_logits, halt_t).masked_fill(~halt_m, 0.0)
-                    halt_l = halt_vec.sum() / halt_m.sum().clamp(min=1).float()
-                    step_loss = step_loss + halt_aux_weight * halt_l
-                bl += ((t + 1) / T) * step_loss
+            avg_reward = 0.0
+            avg_greedy = 0.0
+            avg_adv = 0.0
+            cur_rl_scst_mode = cur_endpoint_loss_mode in rl_scst_modes
+            if cur_rl_scst_mode:
+                B = int(input_ids.shape[0])
+                losses = []
+                sample_rewards = []
+                greedy_rewards = []
+                advantages = []
+                q_embs = batch['rl_q_embs'].cpu().numpy()
+                rl_starts = batch['rl_start_nodes']
+                rl_gold = batch['rl_gold_answers']
+                rl_tuples = batch['rl_tuples']
+                for i in range(B):
+                    adj_i = build_adj_from_tuples(rl_tuples[i])
+                    gold_set_i = set(int(x) for x in rl_gold[i])
+                    q_emb_i = np.asarray(q_embs[i], dtype=np.float32)
+                    in_i = input_ids[i:i + 1]
+                    attn_i = attn[i:i + 1]
+                    logp_s, ent_s, pred_s, taken_s = _rollout_single_policy(
+                        input_ids_1=in_i,
+                        attn_1=attn_i,
+                        adj=adj_i,
+                        start_node=int(rl_starts[i]),
+                        q_emb_np=q_emb_i,
+                        sample_action=True,
+                        no_cycle=phase2_rl_no_cycle,
+                        temperature=phase2_rl_sample_temp,
+                        with_grad=True,
+                    )
+                    r_s = _rl_reward_from_pred(pred_s, gold_set_i, phase2_rl_reward_metric)
+                    if phase2_rl_use_greedy_baseline:
+                        _, _, pred_g, _ = _rollout_single_policy(
+                            input_ids_1=in_i,
+                            attn_1=attn_i,
+                            adj=adj_i,
+                            start_node=int(rl_starts[i]),
+                            q_emb_np=q_emb_i,
+                            sample_action=False,
+                            no_cycle=phase2_rl_no_cycle,
+                            temperature=1.0,
+                            with_grad=False,
+                        )
+                        r_g = _rl_reward_from_pred(pred_g, gold_set_i, phase2_rl_reward_metric)
+                    else:
+                        r_g = 0.0
+                    adv = float(r_s - r_g)
+                    if phase2_rl_adv_clip is not None:
+                        clip_v = float(abs(phase2_rl_adv_clip))
+                        adv = float(max(-clip_v, min(clip_v, adv)))
+                    loss_i = (-adv) * logp_s
+                    if phase2_rl_entropy_weight > 0.0 and taken_s > 0:
+                        loss_i = loss_i - float(phase2_rl_entropy_weight) * (ent_s / float(max(1, taken_s)))
+                    losses.append(loss_i)
+                    sample_rewards.append(float(r_s))
+                    greedy_rewards.append(float(r_g))
+                    advantages.append(float(adv))
+                if losses:
+                    bl = torch.stack(losses).mean()
+                    avg_reward = float(sum(sample_rewards) / max(1, len(sample_rewards)))
+                    avg_greedy = float(sum(greedy_rewards) / max(1, len(greedy_rewards)))
+                    avg_adv = float(sum(advantages) / max(1, len(advantages)))
+                    tot_correct += avg_reward * float(len(sample_rewards))
+                    tot_count += int(len(sample_rewards))
+                else:
+                    avg_reward = 0.0
+                    avg_greedy = 0.0
+                    avg_adv = 0.0
+            else:
+                carry = carry_init_fn({'input_ids': input_ids}, device)
+                T = len(batch['seq_batches'])
+                for t, step in enumerate(batch['seq_batches']):
+                    p_ids = step['puzzle_identifiers'].to(device)
+                    r_ids = step['relation_identifiers'].to(device)
+                    c_mask = step['candidate_mask'].to(device)
+                    endpoint_t = step['endpoint_targets'].to(device)
+                    policy_t = step['policy_targets'].to(device)
+                    halt_t = step['halt_targets'].to(device)
+                    halt_m = step['halt_mask'].to(device)
+                    labels = step['labels'].to(device)
+                    v_mask = step['valid_mask'].to(device)
+                    carry, out = model(carry, {'input_ids': input_ids, 'attention_mask': attn, 'puzzle_identifiers': p_ids, 'relation_identifiers': r_ids, 'candidate_mask': c_mask})
+                    logits = out['scores'].masked_fill(~c_mask, -1e4)
+                    lv = ce(logits, labels).masked_fill(~v_mask, 0.0)
+                    valid = v_mask & (labels >= 0)
+                    if valid.any():
+                        pred = torch.argmax(logits, dim=1)
+                        tot_correct += int((pred[valid] == labels[valid]).sum().item())
+                        tot_count += int(valid.sum().item())
+                    sc = v_mask.sum().clamp(min=1)
+                    ce_loss = lv.sum() / sc
+                    endpoint_loss = torch.zeros((), device=device)
+                    if cur_endpoint_enabled:
+                        ev = bce_endpoint(logits, endpoint_t).masked_fill(~c_mask, 0.0)
+                        ev = ev.sum(dim=1) / c_mask.sum(dim=1).clamp(min=1).float()
+                        ev = ev.masked_fill(~v_mask, 0.0)
+                        endpoint_loss = ev.sum() / sc
+                    policy_loss = torch.zeros((), device=device)
+                    if cur_metric_align_enabled:
+                        # Align train target with final answer reachability:
+                        # maximize probability mass on relations that reduce shortest distance to gold.
+                        logp = torch.log_softmax(logits, dim=1)
+                        pos_mass = (torch.exp(logp) * policy_t).sum(dim=1)
+                        policy_valid = v_mask & (policy_t.sum(dim=1) > 0.0)
+                        pv = (-torch.log(pos_mass.clamp(min=1e-8))).masked_fill(~policy_valid, 0.0)
+                        policy_sc = policy_valid.sum().clamp(min=1).float()
+                        policy_loss = pv.sum() / policy_sc
+
+                    if cur_metric_align_main_mode:
+                        step_loss = policy_loss
+                        if cur_relation_aux_weight > 0.0:
+                            step_loss = step_loss + cur_relation_aux_weight * ce_loss
+                    elif cur_endpoint_main_mode:
+                        step_loss = endpoint_loss
+                        if cur_relation_aux_weight > 0.0:
+                            step_loss = step_loss + cur_relation_aux_weight * ce_loss
+                    else:
+                        step_loss = ce_loss
+                    if (not cur_endpoint_main_mode) and cur_endpoint_aux_weight > 0.0:
+                        step_loss = step_loss + cur_endpoint_aux_weight * endpoint_loss
+                    if (not cur_metric_align_main_mode) and cur_metric_align_aux_weight > 0.0:
+                        step_loss = step_loss + cur_metric_align_aux_weight * policy_loss
+                    if cur_halt_aux_weight > 0.0:
+                        halt_pair = torch.stack(
+                            [out['q_continue_logits'].to(torch.float32), out['q_halt_logits'].to(torch.float32)],
+                            dim=1,
+                        )
+                        halt_labels = halt_t.to(torch.long)
+                        halt_vec = ce_halt(halt_pair, halt_labels).masked_fill(~halt_m, 0.0)
+                        halt_l = halt_vec.sum() / halt_m.sum().clamp(min=1).float()
+                        step_loss = step_loss + cur_halt_aux_weight * halt_l
+                    bl += ((t + 1) / T) * step_loss
             if not torch.isfinite(bl):
                 if is_ddp:
                     raise RuntimeError('non-finite loss in DDP')
@@ -1020,20 +1392,35 @@ def train(args):
             steps += 1
             if is_main:
                 acc = 100.0 * (tot_correct / max(1, tot_count))
-                pbar.set_postfix_str(
-                    f'[step {steps}] loss={bl.item():.4f} avg={tot_loss/max(1,steps):.4f} '
-                    f'acc={acc:.2f}% grad={float(grad_norm):.2e}'
-                )
+                if cur_rl_scst_mode:
+                    pbar.set_postfix_str(
+                        f'[step {steps}] loss={bl.item():.4f} avg={tot_loss/max(1,steps):.4f} '
+                        f'reward={avg_reward:.4f} adv={avg_adv:.4f} grad={float(grad_norm):.2e}'
+                    )
+                else:
+                    pbar.set_postfix_str(
+                        f'[step {steps}] loss={bl.item():.4f} avg={tot_loss/max(1,steps):.4f} '
+                        f'acc={acc:.2f}% grad={float(grad_norm):.2e}'
+                    )
                 if wb is not None:
+                    wb_payload = {
+                        "train/step_loss": float(bl.item()),
+                        "train/step_avg_loss": float(tot_loss / max(1, steps)),
+                        "train/step_acc": float(acc),
+                        "train/grad_norm": float(grad_norm),
+                        "train/epoch": int(ep),
+                        "train/step": int(steps),
+                    }
+                    if cur_rl_scst_mode:
+                        wb_payload.update(
+                            {
+                                "train/rl_reward_sample": float(avg_reward),
+                                "train/rl_reward_greedy": float(avg_greedy),
+                                "train/rl_advantage": float(avg_adv),
+                            }
+                        )
                     wb.log(
-                        {
-                            "train/step_loss": float(bl.item()),
-                            "train/step_avg_loss": float(tot_loss / max(1, steps)),
-                            "train/step_acc": float(acc),
-                            "train/grad_norm": float(grad_norm),
-                            "train/epoch": int(ep),
-                            "train/step": int(steps),
-                        },
+                        wb_payload,
                         step=(ep - 1) * max(1, len(loader)) + steps,
                     )
 
@@ -1045,6 +1432,8 @@ def train(args):
             ckpt = os.path.join(args.out_dir, f'model_ep{ep}.pt')
             torch.save(save_obj.state_dict(), ckpt)
             print(f'Saved {ckpt}')
+            dev_hit1 = None
+            dev_f1 = None
             eval_every = max(1, int(getattr(args, 'eval_every_epochs', 1)))
             eval_start = max(1, int(getattr(args, 'eval_start_epoch', 1)))
             should_eval = ep >= eval_start and ((ep - eval_start) % eval_every == 0)
@@ -1077,6 +1466,8 @@ def train(args):
                     relation_labels=relation_labels,
                 )
                 print(f'[Dev] Hit@1={mh:.4f} F1={mf:.4f} Skip={sk}')
+                dev_hit1 = float(mh)
+                dev_f1 = float(mf)
                 if wb is not None:
                     wb.log(
                         {
@@ -1094,10 +1485,72 @@ def train(args):
                     {
                         "train/epoch_avg_loss": float(tot_loss / max(1, steps)),
                         "train/epoch_acc": float(100.0 * (tot_correct / max(1, tot_count))),
+                        "train/phase2_active": int(1 if use_phase2 else 0),
                         "train/epoch": int(ep),
                     },
                     step=ep * max(1, len(loader)),
                 )
+            epoch_avg_loss = float(tot_loss / max(1, steps))
+            epoch_acc_ratio = float(tot_correct / max(1, tot_count))
+            metric_value = None
+            maximize = True
+            if phase2_auto_metric == 'dev_f1':
+                metric_value = dev_f1
+                maximize = True
+            elif phase2_auto_metric == 'dev_hit1':
+                metric_value = dev_hit1
+                maximize = True
+            elif phase2_auto_metric == 'train_acc':
+                metric_value = epoch_acc_ratio
+                maximize = True
+            elif phase2_auto_metric == 'train_loss':
+                metric_value = epoch_avg_loss
+                maximize = False
+
+            if phase2_auto_enabled and (not phase2_auto_active) and ep >= max(1, phase2_auto_min_epoch):
+                trigger_reason = None
+                if (phase2_auto_threshold is not None) and (metric_value is not None):
+                    if maximize and metric_value >= phase2_auto_threshold:
+                        trigger_reason = f"{phase2_auto_metric}={metric_value:.4f} >= {phase2_auto_threshold:.4f}"
+                    elif (not maximize) and metric_value <= phase2_auto_threshold:
+                        trigger_reason = f"{phase2_auto_metric}={metric_value:.4f} <= {phase2_auto_threshold:.4f}"
+                if (trigger_reason is None) and phase2_auto_patience > 0 and (metric_value is not None):
+                    improved = False
+                    if phase2_auto_best is None:
+                        improved = True
+                    elif maximize:
+                        improved = metric_value > float(phase2_auto_best) + phase2_auto_min_delta
+                    else:
+                        improved = metric_value < float(phase2_auto_best) - phase2_auto_min_delta
+                    if improved:
+                        phase2_auto_best = metric_value
+                        phase2_auto_bad_count = 0
+                    else:
+                        phase2_auto_bad_count += 1
+                        if phase2_auto_bad_count >= phase2_auto_patience:
+                            trigger_reason = (
+                                f"plateau: {phase2_auto_metric} no improvement for {phase2_auto_bad_count} evals"
+                            )
+                if trigger_reason is not None:
+                    phase2_auto_active = True
+                    print(f"[Phase2AutoSwitch] trigger at ep{ep}: {trigger_reason} (effective next epoch)")
+                    if wb is not None:
+                        wb.log(
+                            {
+                                "train/phase2_auto_trigger_epoch": int(ep),
+                                "train/phase2_auto_metric_value": float(metric_value) if metric_value is not None else float('nan'),
+                                "train/phase2_active": 1,
+                            },
+                            step=ep * max(1, len(loader)),
+                        )
+        if is_ddp:
+            phase2_tensor = torch.tensor(
+                [1 if (phase2_auto_active or (phase2_start_epoch > 0 and ep >= phase2_start_epoch)) else 0],
+                dtype=torch.int64,
+                device=device,
+            )
+            dist.broadcast(phase2_tensor, src=0)
+            phase2_auto_active = bool(int(phase2_tensor.item()))
         # Keep all ranks in sync while rank0 runs (potentially long) dev eval.
         if is_ddp:
             dist.barrier()
