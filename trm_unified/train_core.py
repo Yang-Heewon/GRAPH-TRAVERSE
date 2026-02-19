@@ -92,6 +92,39 @@ def prune_rel_mix_cpu(q_emb, cand_rels, rel_mem, keep_k, rand_k, rand_pool_mult=
     return [cand_rels[i] for i in sel]
 
 
+def _build_rel_to_nodes(edges):
+    rel_to_nodes = {}
+    rel_seen = {}
+    for r, n in edges:
+        rr = int(r)
+        nn = int(n)
+        if rr not in rel_to_nodes:
+            rel_to_nodes[rr] = []
+            rel_seen[rr] = set()
+        if nn not in rel_seen[rr]:
+            rel_seen[rr].add(nn)
+            rel_to_nodes[rr].append(nn)
+    return rel_to_nodes
+
+
+def _select_rel_candidates(
+    rel_to_nodes: dict,
+    q_emb: np.ndarray,
+    rel_mem,
+    max_relations: int,
+    prune_keep: int,
+    prune_rand: int,
+):
+    rel_cands = list(rel_to_nodes.keys())
+    if not rel_cands:
+        return rel_cands
+    if max_relations > 0 and len(rel_cands) > max_relations:
+        rel_cands = prune_rel_mix_cpu(q_emb, rel_cands, rel_mem, int(max_relations), 0)
+    if prune_keep > 0 or prune_rand > 0:
+        rel_cands = prune_rel_mix_cpu(q_emb, rel_cands, rel_mem, int(prune_keep), int(prune_rand))
+    return rel_cands
+
+
 class PathDataset(Dataset):
     def __init__(self, jsonl_path: str, max_steps: int):
         self.jsonl_path = jsonl_path
@@ -147,7 +180,20 @@ def make_collate(
 ):
     tok = load_tokenizer(tokenizer_name)
     rel_mem = np.load(rel_npy, mmap_mode='r')
-    q_mem = np.load(q_npy, mmap_mode='r') if q_npy and os.path.exists(q_npy) else None
+    if not q_npy:
+        raise RuntimeError("query embedding path is empty for training collate (q_npy).")
+    if not os.path.exists(q_npy):
+        raise FileNotFoundError(
+            f"query embedding file not found for training: {q_npy}. "
+            "Run embed stage first and ensure query_train.npy exists."
+        )
+    q_mem = np.load(q_npy, mmap_mode='r')
+    if int(q_mem.shape[1]) != int(rel_mem.shape[1]):
+        raise RuntimeError(
+            f"embedding dim mismatch (train): query_dim={int(q_mem.shape[1])}, "
+            f"relation_dim={int(rel_mem.shape[1])}. "
+            "Rebuild query/relation embeddings with the same embedding model/style."
+        )
 
     def _can_reach_goal(adj, node: int, goals: set, rem_steps: int, memo: dict) -> bool:
         key = (int(node), int(rem_steps))
@@ -197,11 +243,14 @@ def make_collate(
         sample_ctx = []
         for b in batch:
             adj = build_adj_from_tuples(b['tuples'])
-            if q_mem is None:
-                q_emb = np.zeros((rel_mem.shape[1],), dtype=np.float32)
-            else:
-                qi = b['ex_line'] if b['ex_line'] < q_mem.shape[0] else 0
-                q_emb = np.asarray(q_mem[qi], dtype=np.float32)
+            qi = int(b['ex_line'])
+            if qi < 0 or qi >= int(q_mem.shape[0]):
+                raise RuntimeError(
+                    f"query_train.npy index out of range: ex_line={qi}, "
+                    f"q_mem_rows={int(q_mem.shape[0])}. "
+                    "Rebuild embeddings from the same processed train.jsonl."
+                )
+            q_emb = np.asarray(q_mem[qi], dtype=np.float32)
             gold_set = set(int(x) for x in b.get('answers_cid', []))
             dist_to_goal = _shortest_dist_to_goals(adj, gold_set, max_steps) if gold_set else {}
             sample_ctx.append((adj, q_emb, gold_set, {}, dist_to_goal))
@@ -219,16 +268,15 @@ def make_collate(
                 gold_r = int(segs[idx + 1])
                 adj, q_emb, gold_set, reach_memo, dist_to_goal = sample_ctx[i]
                 edges = adj.get(cur, [])
-                if max_neighbors > 0 and len(edges) > max_neighbors:
-                    edges = edges[:max_neighbors]
-                rel_cands = []
-                seen = set()
-                for r, _ in edges:
-                    r = int(r)
-                    if r not in seen:
-                        seen.add(r)
-                        rel_cands.append(r)
-                rel_cands = prune_rel_mix_cpu(q_emb, rel_cands, rel_mem, prune_keep, prune_rand)
+                rel_to_nodes = _build_rel_to_nodes(edges)
+                rel_cands = _select_rel_candidates(
+                    rel_to_nodes=rel_to_nodes,
+                    q_emb=q_emb,
+                    rel_mem=rel_mem,
+                    max_relations=int(max_neighbors),
+                    prune_keep=int(prune_keep),
+                    prune_rand=int(prune_rand),
+                )
                 if gold_r not in rel_cands:
                     rel_cands.append(gold_r)
                 np.random.shuffle(rel_cands)
@@ -244,10 +292,8 @@ def make_collate(
                 remain = max_steps - t
                 pos_rels_policy = set()
                 if cur_dist is not None and cur_dist > 0 and cur_dist <= remain:
-                    for r, nxt in edges:
-                        rr = int(r)
-                        dn = dist_to_goal.get(int(nxt), None)
-                        if dn is not None and dn == cur_dist - 1:
+                    for rr, next_nodes in rel_to_nodes.items():
+                        if any(dist_to_goal.get(int(nxt), None) == cur_dist - 1 for nxt in next_nodes):
                             pos_rels_policy.add(rr)
                 pt_row = [1.0 if rr in pos_rels_policy else 0.0 for rr in rel_cands]
                 if sum(pt_row) <= 0.0:
@@ -257,12 +303,10 @@ def make_collate(
                     rem_steps = max(0, max_steps - (t + 1))
                     pos_rels = set()
                     if gold_set:
-                        for r, nxt in edges:
-                            rr = int(r)
-                            nn = int(nxt)
+                        for rr, next_nodes in rel_to_nodes.items():
                             if rr in pos_rels:
                                 continue
-                            if _can_reach_goal(adj, nn, gold_set, rem_steps, reach_memo):
+                            if any(_can_reach_goal(adj, int(nn), gold_set, rem_steps, reach_memo) for nn in next_nodes):
                                 pos_rels.add(rr)
                     endpoint_targets.append([1.0 if rr in pos_rels else 0.0 for rr in rel_cands])
                 else:
@@ -683,10 +727,32 @@ def evaluate_relation_beam(
     model.eval()
     tok = load_tokenizer(tokenizer_name)
     rel_mem = np.load(rel_npy, mmap_mode='r')
-    q_mem = np.load(q_npy, mmap_mode='r') if q_npy and os.path.exists(q_npy) else None
+    if not q_npy:
+        raise RuntimeError(
+            f"query embedding path is empty for evaluation (eval_json={eval_json}). "
+            "Provide query_emb_dev_npy/query_emb_eval_npy."
+        )
+    if not os.path.exists(q_npy):
+        raise FileNotFoundError(
+            f"query embedding file not found for evaluation: {q_npy} "
+            f"(eval_json={eval_json})."
+        )
+    q_mem = np.load(q_npy, mmap_mode='r')
+    if int(q_mem.shape[1]) != int(rel_mem.shape[1]):
+        raise RuntimeError(
+            f"embedding dim mismatch (eval): query_dim={int(q_mem.shape[1])}, "
+            f"relation_dim={int(rel_mem.shape[1])}, eval_json={eval_json}. "
+            "Rebuild query/relation embeddings with the same embedding model/style."
+        )
 
     data = list(iter_json_records(eval_json))
     total = len(data) if eval_limit < 0 else min(len(data), eval_limit)
+    if total > int(q_mem.shape[0]):
+        raise RuntimeError(
+            f"query embedding rows mismatch: eval_examples={total}, q_mem_rows={int(q_mem.shape[0])}, "
+            f"eval_json={eval_json}, q_npy={q_npy}. "
+            "Use query_dev.npy for dev eval and query_test.npy for test eval."
+        )
     hit1 = []
     f1s = []
     skip = 0
@@ -732,12 +798,17 @@ def evaluate_relation_beam(
         if not starts or not tuples:
             skip += 1
             continue
+        if not gold:
+            skip += 1
+            continue
 
-        if q_mem is None:
-            q_emb = np.zeros((rel_mem.shape[1],), dtype=np.float32)
-        else:
-            qi = ex_idx if ex_idx < q_mem.shape[0] else 0
-            q_emb = np.asarray(q_mem[qi], dtype=np.float32)
+        qi = int(ex_idx)
+        if qi < 0 or qi >= int(q_mem.shape[0]):
+            raise RuntimeError(
+                f"query eval index out of range: ex_idx={qi}, q_mem_rows={int(q_mem.shape[0])}, "
+                f"eval_json={eval_json}, q_npy={q_npy}"
+            )
+        q_emb = np.asarray(q_mem[qi], dtype=np.float32)
 
         q_toks = tok(ex.get('question', ''), return_tensors='pt', truncation=True, max_length=max_q_len)
         q_toks = {k: v.to(device) for k, v in q_toks.items()}
@@ -762,8 +833,6 @@ def evaluate_relation_beam(
                     nb['stopped'] = True
                     new_beams.append(nb)
                     continue
-                if max_neighbors > 0 and len(cand) > max_neighbors:
-                    cand = cand[:max_neighbors]
                 if no_cycle:
                     cand = [(r, nxt) for r, nxt in cand if int(nxt) not in b['nodes']]
                     if not cand:
@@ -772,20 +841,26 @@ def evaluate_relation_beam(
                         new_beams.append(nb)
                         continue
 
-                rel_cands = []
-                seen = set()
-                for r, _ in cand:
-                    rr = int(r)
-                    if rr not in seen:
-                        seen.add(rr)
-                        rel_cands.append(rr)
+                rel_to_nodes = _build_rel_to_nodes(cand)
+                rel_cands = list(rel_to_nodes.keys())
                 if not rel_cands:
                     nb = dict(b)
                     nb['stopped'] = True
                     new_beams.append(nb)
                     continue
-                if prune_keep > 0 and len(rel_cands) > prune_keep:
-                    rel_cands = prune_rel_mix_cpu(q_emb, rel_cands, rel_mem, prune_keep, 0)
+                rel_cands = _select_rel_candidates(
+                    rel_to_nodes=rel_to_nodes,
+                    q_emb=q_emb,
+                    rel_mem=rel_mem,
+                    max_relations=int(max_neighbors),
+                    prune_keep=int(prune_keep),
+                    prune_rand=0,
+                )
+                if not rel_cands:
+                    nb = dict(b)
+                    nb['stopped'] = True
+                    new_beams.append(nb)
+                    continue
 
                 cur_pid = _safe_entity_id(cur)
                 p_ids = torch.full((1, len(rel_cands)), cur_pid, dtype=torch.long, device=device)
@@ -820,12 +895,7 @@ def evaluate_relation_beam(
                 topv, topi = torch.topk(logp, k=topk)
                 for v, i in zip(topv.tolist(), topi.tolist()):
                     r_sel = int(rel_cands[int(i)])
-                    next_nodes = []
-                    seen_nodes = set()
-                    for r, nxt in cand:
-                        if int(r) == r_sel and int(nxt) not in seen_nodes:
-                            seen_nodes.add(int(nxt))
-                            next_nodes.append(int(nxt))
+                    next_nodes = rel_to_nodes.get(r_sel, [])
                     if not next_nodes:
                         if no_cycle:
                             continue
@@ -914,6 +984,18 @@ def train(args):
     is_ddp, rank, local_rank, world_size, device = _setup_ddp()
     is_main = rank == 0
     wb = _setup_wandb(args, is_main)
+
+    # Full-dev evaluation on rank0 while other DDP ranks wait at barrier can
+    # hit process-group timeout when eval_limit=-1 and timeout is too small.
+    if is_ddp and str(getattr(args, 'dev_json', '')).strip():
+        eval_limit_cfg = int(getattr(args, 'eval_limit', -1))
+        timeout_min_cfg = int(os.environ.get("DDP_TIMEOUT_MINUTES", "30"))
+        if eval_limit_cfg < 0 and timeout_min_cfg <= 90:
+            raise RuntimeError(
+                "DDP risk: eval_limit=-1 (full dev eval) with DDP_TIMEOUT_MINUTES<=90 may timeout "
+                "while non-rank0 workers wait at barrier. "
+                "Set EVAL_LIMIT=200 (recommended) or DDP_TIMEOUT_MINUTES>=180."
+            )
 
     kb2idx = load_kb_map(args.entities_txt)
     rel2idx = load_rel_map(args.relations_txt)
@@ -1017,7 +1099,6 @@ def train(args):
 
     if bool(getattr(args, 'oracle_diag_only', False)):
         if is_ddp:
-            dist.barrier()
             dist.destroy_process_group()
         if wb is not None:
             wb.finish()
@@ -1069,6 +1150,9 @@ def train(args):
     phase2_rl_use_greedy_baseline = bool(getattr(args, 'phase2_rl_use_greedy_baseline', True))
     phase2_rl_no_cycle = bool(getattr(args, 'phase2_rl_no_cycle', getattr(args, 'eval_no_cycle', False)))
     phase2_rl_adv_clip = _parse_optional_float(getattr(args, 'phase2_rl_adv_clip', None))
+    train_acc_mode = str(getattr(args, 'train_acc_mode', 'endpoint_proxy')).strip().lower()
+    if train_acc_mode not in {'auto', 'endpoint_proxy', 'relation'}:
+        train_acc_mode = 'endpoint_proxy'
     if phase2_auto_metric not in {'dev_f1', 'dev_hit1', 'train_acc', 'train_loss'}:
         phase2_auto_metric = 'dev_f1'
     if phase2_rl_reward_metric not in {'f1', 'hit1', 'hit'}:
@@ -1151,25 +1235,18 @@ def train(args):
             taken = 0
             for _ in range(int(args.max_steps)):
                 edges = adj.get(cur, [])
-                if int(args.max_neighbors) > 0 and len(edges) > int(args.max_neighbors):
-                    edges = edges[:int(args.max_neighbors)]
                 if no_cycle:
                     edges = [(r, n) for r, n in edges if int(n) not in visited]
                 if not edges:
                     break
-                rel_cands = []
-                seen_rel = set()
-                for r, _ in edges:
-                    rr = int(r)
-                    if rr not in seen_rel:
-                        seen_rel.add(rr)
-                        rel_cands.append(rr)
-                rel_cands = prune_rel_mix_cpu(
-                    q_emb_np,
-                    rel_cands,
-                    rel_mem,
-                    int(args.prune_keep),
-                    int(args.prune_rand),
+                rel_to_nodes = _build_rel_to_nodes(edges)
+                rel_cands = _select_rel_candidates(
+                    rel_to_nodes=rel_to_nodes,
+                    q_emb=q_emb_np,
+                    rel_mem=rel_mem,
+                    max_relations=int(args.max_neighbors),
+                    prune_keep=int(args.prune_keep),
+                    prune_rand=int(args.prune_rand),
                 )
                 if not rel_cands:
                     break
@@ -1200,12 +1277,7 @@ def train(args):
                     idx = int(torch.argmax(logp_1).item())
                 logprob_sum = logprob_sum + logp_1[idx]
                 r_sel = int(rel_cands[idx])
-                next_nodes = []
-                seen_nodes = set()
-                for rr, nn in edges:
-                    if int(rr) == r_sel and int(nn) not in seen_nodes:
-                        seen_nodes.add(int(nn))
-                        next_nodes.append(int(nn))
+                next_nodes = rel_to_nodes.get(r_sel, [])
                 if not next_nodes:
                     break
                 if sample_action and len(next_nodes) > 1:
@@ -1217,9 +1289,20 @@ def train(args):
                 taken += 1
             return logprob_sum, entropy_sum, int(cur), int(taken)
 
-    def _entity_dist_loss_from_steps(step_cache, tuples_list, starts_list, golds_list):
+    def _entity_dist_loss_from_steps(
+        step_cache,
+        tuples_list,
+        starts_list,
+        golds_list,
+        *,
+        compute_loss: bool = True,
+        return_stats: bool = False,
+    ):
         eps = 1e-12
         losses = []
+        hit_sum = 0.0
+        f1_sum = 0.0
+        n_stat = 0
         B = int(len(starts_list))
         for i in range(B):
             gold_set = set(int(x) for x in golds_list[i])
@@ -1301,21 +1384,35 @@ def train(args):
                 else:
                     p = p_next
 
-            gold = torch.zeros((N,), device=device, dtype=dtype)
-            hit_gold = 0
-            for g in gold_set:
-                if g in node2idx:
-                    gold[node2idx[g]] = 1.0
-                    hit_gold += 1
-            if hit_gold <= 0:
-                continue
-            gold = gold / gold.sum().clamp(min=1.0)
-            loss_i = F.kl_div(torch.log(p.clamp(min=eps)), gold, reduction='sum')
-            losses.append(loss_i)
+            if return_stats:
+                pred_idx = int(torch.argmax(p).item())
+                pred_node = int(node_list[pred_idx])
+                inter = 1 if pred_node in gold_set else 0
+                hit = float(inter)
+                precision = float(inter)  # |pred_set|=1
+                recall = float(inter) / float(max(1, len(gold_set)))
+                f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0.0 else 0.0
+                hit_sum += hit
+                f1_sum += f1
+                n_stat += 1
 
-        if losses:
-            return torch.stack(losses).mean()
-        return torch.zeros((), device=device)
+            if compute_loss:
+                gold = torch.zeros((N,), device=device, dtype=dtype)
+                hit_gold = 0
+                for g in gold_set:
+                    if g in node2idx:
+                        gold[node2idx[g]] = 1.0
+                        hit_gold += 1
+                if hit_gold <= 0:
+                    continue
+                gold = gold / gold.sum().clamp(min=1.0)
+                loss_i = F.kl_div(torch.log(p.clamp(min=eps)), gold, reduction='sum')
+                losses.append(loss_i)
+
+        loss_out = torch.stack(losses).mean() if (compute_loss and losses) else torch.zeros((), device=device)
+        if return_stats:
+            return loss_out, float(hit_sum), float(f1_sum), int(n_stat)
+        return loss_out
 
     for ep in range(1, args.epochs + 1):
         if sampler is not None:
@@ -1341,6 +1438,11 @@ def train(args):
         cur_endpoint_main_mode = cur_endpoint_loss_mode in endpoint_main_modes
         cur_entity_dist_main_mode = cur_endpoint_loss_mode in entity_dist_main_modes
         cur_metric_align_main_mode = cur_endpoint_loss_mode in metric_align_main_modes
+        epoch_rl_scst_mode = cur_endpoint_loss_mode in rl_scst_modes
+        if train_acc_mode == 'auto':
+            epoch_acc_mode = 'rl_reward' if epoch_rl_scst_mode else 'endpoint_proxy'
+        else:
+            epoch_acc_mode = train_acc_mode
         cur_endpoint_enabled = cur_endpoint_main_mode or (cur_endpoint_aux_weight > 0.0)
         cur_metric_align_enabled = cur_metric_align_main_mode or (cur_metric_align_aux_weight > 0.0)
         if is_main and (ep == 1 or last_phase2_state is None or bool(use_phase2) != bool(last_phase2_state)):
@@ -1350,13 +1452,17 @@ def train(args):
                 f"rel_aux={cur_relation_aux_weight:.4f} "
                 f"endpoint_aux={cur_endpoint_aux_weight:.4f} "
                 f"metric_align_aux={cur_metric_align_aux_weight:.4f} "
-                f"halt_aux={cur_halt_aux_weight:.4f}"
+                f"halt_aux={cur_halt_aux_weight:.4f} "
+                f"train_acc_mode={epoch_acc_mode}"
             )
         last_phase2_state = bool(use_phase2)
         pbar = tqdm(loader, disable=not is_main, desc=f'Ep {ep}')
         tot_loss = 0.0
-        tot_correct = 0
-        tot_count = 0
+        tot_metric_sum = 0.0
+        tot_metric_count = 0
+        tot_metric_f1_sum = 0.0
+        tot_rel_correct = 0
+        tot_rel_count = 0
         steps = 0
         for batch in pbar:
             input_ids = batch['input_ids'].to(device, non_blocking=True)
@@ -1426,8 +1532,9 @@ def train(args):
                     avg_reward = float(sum(sample_rewards) / max(1, len(sample_rewards)))
                     avg_greedy = float(sum(greedy_rewards) / max(1, len(greedy_rewards)))
                     avg_adv = float(sum(advantages) / max(1, len(advantages)))
-                    tot_correct += avg_reward * float(len(sample_rewards))
-                    tot_count += int(len(sample_rewards))
+                    tot_metric_sum += avg_reward * float(len(sample_rewards))
+                    tot_metric_count += int(len(sample_rewards))
+                    tot_metric_f1_sum += avg_reward * float(len(sample_rewards))
                 else:
                     avg_reward = 0.0
                     avg_greedy = 0.0
@@ -1435,6 +1542,7 @@ def train(args):
             else:
                 carry = carry_init_fn({'input_ids': input_ids}, device)
                 T = len(batch['seq_batches'])
+                need_endpoint_proxy_metric = (epoch_acc_mode == 'endpoint_proxy')
                 entity_step_cache = []
                 for t, step in enumerate(batch['seq_batches']):
                     p_ids = step['puzzle_identifiers'].to(device)
@@ -1448,7 +1556,7 @@ def train(args):
                     v_mask = step['valid_mask'].to(device)
                     carry, out = model(carry, {'input_ids': input_ids, 'attention_mask': attn, 'puzzle_identifiers': p_ids, 'relation_identifiers': r_ids, 'candidate_mask': c_mask})
                     logits = out['scores'].masked_fill(~c_mask, -1e4)
-                    if cur_entity_dist_main_mode:
+                    if cur_entity_dist_main_mode or need_endpoint_proxy_metric:
                         probs = torch.softmax(logits, dim=1)
                         entity_step_cache.append(
                             {
@@ -1462,8 +1570,8 @@ def train(args):
                     valid = v_mask & (labels >= 0)
                     if valid.any():
                         pred = torch.argmax(logits, dim=1)
-                        tot_correct += int((pred[valid] == labels[valid]).sum().item())
-                        tot_count += int(valid.sum().item())
+                        tot_rel_correct += int((pred[valid] == labels[valid]).sum().item())
+                        tot_rel_count += int(valid.sum().item())
                     sc = v_mask.sum().clamp(min=1)
                     ce_loss = lv.sum() / sc
                     endpoint_loss = torch.zeros((), device=device)
@@ -1511,12 +1619,28 @@ def train(args):
                         halt_l = halt_vec.sum() / halt_m.sum().clamp(min=1).float()
                         step_loss = step_loss + cur_halt_aux_weight * halt_l
                     bl += ((t + 1) / T) * step_loss
+                if need_endpoint_proxy_metric and entity_step_cache:
+                    with torch.no_grad():
+                        _, proxy_hit_sum, proxy_f1_sum, proxy_n = _entity_dist_loss_from_steps(
+                            step_cache=entity_step_cache,
+                            tuples_list=batch['rl_tuples'],
+                            starts_list=batch['rl_start_nodes'],
+                            golds_list=batch['rl_gold_answers'],
+                            compute_loss=False,
+                            return_stats=True,
+                        )
+                    if proxy_n > 0:
+                        tot_metric_sum += float(proxy_hit_sum)
+                        tot_metric_f1_sum += float(proxy_f1_sum)
+                        tot_metric_count += int(proxy_n)
                 if cur_entity_dist_main_mode:
                     entity_dist_loss = _entity_dist_loss_from_steps(
                         step_cache=entity_step_cache,
                         tuples_list=batch['rl_tuples'],
                         starts_list=batch['rl_start_nodes'],
                         golds_list=batch['rl_gold_answers'],
+                        compute_loss=True,
+                        return_stats=False,
                     )
                     bl = bl + entity_dist_loss
             if not torch.isfinite(bl):
@@ -1529,22 +1653,41 @@ def train(args):
             tot_loss += bl.item()
             steps += 1
             if is_main:
-                acc = 100.0 * (tot_correct / max(1, tot_count))
+                rel_acc = 100.0 * (tot_rel_correct / max(1, tot_rel_count))
+                endpoint_hit1_proxy = 100.0 * (tot_metric_sum / max(1, tot_metric_count))
+                endpoint_f1_proxy = 100.0 * (tot_metric_f1_sum / max(1, tot_metric_count))
+                if epoch_acc_mode == 'relation':
+                    acc = rel_acc
+                    acc_label = 'rel_acc'
+                elif epoch_acc_mode == 'rl_reward':
+                    acc = endpoint_hit1_proxy
+                    acc_label = 'rl_reward'
+                else:
+                    # endpoint_proxy
+                    if tot_metric_count > 0:
+                        acc = endpoint_hit1_proxy
+                        acc_label = 'endpoint_hit1'
+                    else:
+                        acc = rel_acc
+                        acc_label = 'rel_acc_fallback'
                 if cur_rl_scst_mode:
                     pbar.set_postfix_str(
                         f'[step {steps}] loss={bl.item():.4f} avg={tot_loss/max(1,steps):.4f} '
-                        f'reward={avg_reward:.4f} adv={avg_adv:.4f} grad={float(grad_norm):.2e}'
+                        f'reward={avg_reward:.4f} adv={avg_adv:.4f} acc({acc_label})={acc:.2f}% grad={float(grad_norm):.2e}'
                     )
                 else:
                     pbar.set_postfix_str(
                         f'[step {steps}] loss={bl.item():.4f} avg={tot_loss/max(1,steps):.4f} '
-                        f'acc={acc:.2f}% grad={float(grad_norm):.2e}'
+                        f'acc({acc_label})={acc:.2f}% rel_acc={rel_acc:.2f}% ep_f1_proxy={endpoint_f1_proxy:.2f}% grad={float(grad_norm):.2e}'
                     )
                 if wb is not None:
                     wb_payload = {
                         "train/step_loss": float(bl.item()),
                         "train/step_avg_loss": float(tot_loss / max(1, steps)),
                         "train/step_acc": float(acc),
+                        "train/step_rel_acc": float(rel_acc),
+                        "train/step_endpoint_hit1_proxy": float(endpoint_hit1_proxy),
+                        "train/step_endpoint_f1_proxy": float(endpoint_f1_proxy),
                         "train/grad_norm": float(grad_norm),
                         "train/epoch": int(ep),
                         "train/step": int(steps),
@@ -1562,7 +1705,36 @@ def train(args):
                         step=(ep - 1) * max(1, len(loader)) + steps,
                     )
 
+        epoch_tot_loss = float(tot_loss)
+        epoch_steps = int(steps)
+        epoch_tot_metric_sum = float(tot_metric_sum)
+        epoch_tot_metric_count = int(tot_metric_count)
+        epoch_tot_metric_f1_sum = float(tot_metric_f1_sum)
+        epoch_tot_rel_correct = int(tot_rel_correct)
+        epoch_tot_rel_count = int(tot_rel_count)
         if is_ddp:
+            # Aggregate epoch metrics across all ranks so train_acc is not rank0-local.
+            epoch_reduce = torch.tensor(
+                [
+                    float(tot_loss),
+                    float(steps),
+                    float(tot_metric_sum),
+                    float(tot_metric_count),
+                    float(tot_metric_f1_sum),
+                    float(tot_rel_correct),
+                    float(tot_rel_count),
+                ],
+                dtype=torch.float64,
+                device=device,
+            )
+            dist.all_reduce(epoch_reduce, op=dist.ReduceOp.SUM)
+            epoch_tot_loss = float(epoch_reduce[0].item())
+            epoch_steps = int(round(float(epoch_reduce[1].item())))
+            epoch_tot_metric_sum = float(epoch_reduce[2].item())
+            epoch_tot_metric_count = int(round(float(epoch_reduce[3].item())))
+            epoch_tot_metric_f1_sum = float(epoch_reduce[4].item())
+            epoch_tot_rel_correct = int(round(float(epoch_reduce[5].item())))
+            epoch_tot_rel_count = int(round(float(epoch_reduce[6].item())))
             dist.barrier()
         if is_main:
             save_obj = model.module if hasattr(model, 'module') else model
@@ -1618,18 +1790,29 @@ def train(args):
                     )
             elif getattr(args, 'dev_json', ''):
                 print(f'[Dev] skip eval at ep{ep} (start={eval_start}, every={eval_every})')
+            epoch_avg_loss = float(epoch_tot_loss / max(1, epoch_steps))
+            epoch_rel_acc_ratio = float(epoch_tot_rel_correct / max(1, epoch_tot_rel_count))
+            epoch_endpoint_hit_ratio = float(epoch_tot_metric_sum / max(1, epoch_tot_metric_count))
+            epoch_endpoint_f1_ratio = float(epoch_tot_metric_f1_sum / max(1, epoch_tot_metric_count))
+            if epoch_acc_mode == 'relation':
+                epoch_acc_ratio = epoch_rel_acc_ratio
+            elif epoch_acc_mode == 'rl_reward':
+                epoch_acc_ratio = epoch_endpoint_hit_ratio
+            else:
+                epoch_acc_ratio = epoch_endpoint_hit_ratio if epoch_tot_metric_count > 0 else epoch_rel_acc_ratio
             if wb is not None:
                 wb.log(
                     {
-                        "train/epoch_avg_loss": float(tot_loss / max(1, steps)),
-                        "train/epoch_acc": float(100.0 * (tot_correct / max(1, tot_count))),
+                        "train/epoch_avg_loss": float(epoch_avg_loss),
+                        "train/epoch_acc": float(100.0 * epoch_acc_ratio),
+                        "train/epoch_rel_acc": float(100.0 * epoch_rel_acc_ratio),
+                        "train/epoch_endpoint_hit1_proxy": float(100.0 * epoch_endpoint_hit_ratio),
+                        "train/epoch_endpoint_f1_proxy": float(100.0 * epoch_endpoint_f1_ratio),
                         "train/phase2_active": int(1 if use_phase2 else 0),
                         "train/epoch": int(ep),
                     },
                     step=ep * max(1, len(loader)),
                 )
-            epoch_avg_loss = float(tot_loss / max(1, steps))
-            epoch_acc_ratio = float(tot_correct / max(1, tot_count))
             metric_value = None
             maximize = True
             if phase2_auto_metric == 'dev_f1':

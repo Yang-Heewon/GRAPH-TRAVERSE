@@ -169,9 +169,12 @@ def encode_texts(
         mdl = AutoModel.from_pretrained(model_name, trust_remote_code=True).to(run_device)
         if torch.cuda.is_available() and len(gpu_ids) > 1:
             mdl = torch.nn.DataParallel(mdl, device_ids=gpu_ids, output_device=gpu_ids[0])
-    except Exception:
-        print(f"⚠️ failed to load embedding model '{model_name}', falling back to local-hash embeddings")
-        return encode_texts_local_hash(texts, desc=f"{desc}(fallback)")
+    except Exception as e:
+        raise RuntimeError(
+            f"failed to load embedding model '{model_name}' with backend='{embed_backend}' "
+            f"(device='{run_device}'): {e}. "
+            "Install/check model dependencies or set an explicit valid model name."
+        ) from e
     mdl.eval()
 
     out = []

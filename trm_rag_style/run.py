@@ -96,7 +96,13 @@ def enrich_paths(cfg):
     cfg['relation_emb_npy'] = os.path.join(cfg['emb_dir'], 'relation_embeddings.npy')
     cfg['query_emb_train_npy'] = os.path.join(cfg['emb_dir'], 'query_train.npy')
     cfg['query_emb_dev_npy'] = os.path.join(cfg['emb_dir'], 'query_dev.npy')
-    cfg['query_emb_eval_npy'] = cfg['query_emb_dev_npy']
+    query_test = os.path.join(cfg['emb_dir'], 'query_test.npy')
+    # Keep eval query embeddings aligned with eval split.
+    # For test evaluation, require query_test.npy (fail-fast if missing).
+    if cfg['eval_json'] == cfg['test_jsonl']:
+        cfg['query_emb_eval_npy'] = query_test
+    else:
+        cfg['query_emb_eval_npy'] = cfg['query_emb_dev_npy']
 
     return cfg
 

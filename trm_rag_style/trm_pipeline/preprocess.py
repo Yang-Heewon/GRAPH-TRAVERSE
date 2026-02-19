@@ -67,17 +67,20 @@ def run(cfg):
         pp_workers = max(1, (os.cpu_count() or 2) - 1)
 
     out = {}
-    if cfg.get("entity_names_json"):
+    entity_names_json = str(cfg.get("entity_names_json") or "").strip()
+    if entity_names_json and os.path.exists(entity_names_json):
         merged_out = cfg.get("merged_entities_txt") or os.path.join(
             cfg["workspace_root"], "data", f"{cfg['dataset']}_entity_text.txt"
         )
         meta = _build_entities_with_names(
             entities_txt=cfg["entities_txt"],
-            entity_names_json=cfg["entity_names_json"],
+            entity_names_json=entity_names_json,
             output_txt=merged_out,
         )
         cfg["entities_txt"] = merged_out
         out["entities_with_names"] = meta
+    elif entity_names_json:
+        print(f"[warn] entity_names_json not found: {entity_names_json} (fallback to raw entity IDs)")
 
     custom = _custom_link_inputs(cfg)
     if custom is not None:

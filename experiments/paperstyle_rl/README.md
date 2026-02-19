@@ -1,36 +1,51 @@
-# Paperstyle -> RL Preset
+# Paperstyle -> RL Pipeline
 
-이 폴더는 다음 실험 흐름만 분리해서 실행하기 위한 전용 preset입니다.
+This folder contains the active preset:
 
-1. `논문작업` 스타일 전처리/임베딩 재현
-2. TRM phase1 학습 (relation CE 중심)
-3. phase1 체크포인트에서 RL phase2 추가 파인튜닝
-4. phase2 체크포인트로 test 평가(Hit@1/F1) 산출
+1. `preprocess`
+2. `embed` (GNN-RAG exact style)
+3. `phase1` supervised train
+4. `phase2` RL fine-tune
+5. `test` evaluation
 
-## 빠른 실행(권장)
+## Cross-Platform Entrypoint
+
+Use `run_pipeline.py` on Linux/macOS/Windows.
+
+Linux/macOS:
 
 ```bash
 cd /data2/workspace/heewon/GRAPH-TRAVERSE
-bash experiments/paperstyle_rl/run_all_wandb.sh
+python experiments/paperstyle_rl/run_pipeline.py --stage all
 ```
 
-`run_all_wandb.sh`가 기본 진입점입니다. 내부에서 `run_all.sh`를 호출해
-`00_preprocess -> 01_embed -> 02_train_phase1 -> 03_train_phase2_rl -> 04_eval_phase2_test`
-순서로 끝까지 실행합니다.
+Windows PowerShell:
 
-## 단계별 실행
+```powershell
+cd C:\path\to\GRAPH-TRAVERSE
+.\experiments\paperstyle_rl\run_pipeline.ps1 -Stage all
+```
+
+Windows CMD:
+
+```bat
+cd C:\path\to\GRAPH-TRAVERSE
+experiments\paperstyle_rl\run_pipeline.cmd --stage all
+```
+
+Run one stage only:
 
 ```bash
-bash experiments/paperstyle_rl/00_preprocess.sh
-bash experiments/paperstyle_rl/01_embed.sh
-bash experiments/paperstyle_rl/02_train_phase1.sh
-bash experiments/paperstyle_rl/03_train_phase2_rl.sh
-bash experiments/paperstyle_rl/04_eval_phase2_test.sh
+python experiments/paperstyle_rl/run_pipeline.py --stage phase1
 ```
 
-## 주요 환경변수
+## Linux Bash Wrappers
 
-공통 변수는 `experiments/paperstyle_rl/env.sh`에 있습니다.
+The existing bash wrappers are still available (`00_*.sh`, `run_all.sh`, `run_all_wandb.sh`) and map to the same stages.
+
+## Key Environment Variables
+
+Main variables:
 
 - `DATASET` (default: `cwq`)
 - `EPOCHS_PHASE1` (default: `5`)
@@ -38,29 +53,24 @@ bash experiments/paperstyle_rl/04_eval_phase2_test.sh
 - `BATCH_SIZE_PHASE1` (default: `6`)
 - `BATCH_SIZE_PHASE2` (default: `2`)
 - `LR` (default: `2e-4`)
-- `WANDB_ENTITY` (default: `heewon6205-chung-ang-university`)
-- `NPROC_PER_NODE` (phase1 default: `3`)
-- `NPROC_PER_NODE_PHASE2` (phase2 default: `1`, RL 안정성용)
-- `CKPT_DIR_PHASE1`, `CKPT_DIR_PHASE2`
+- `NPROC_PER_NODE` (default: `3`)
+- `NPROC_PER_NODE_PHASE2` (default: `1`)
 - `EMBED_STYLE` (default: `gnn_rag_gnn_exact`)
 - `EMBED_BACKEND` (default: `sentence_transformers`)
 - `EMB_MODEL` (default: `sentence-transformers/all-MiniLM-L6-v2`)
-- `EMBED_STYLE` 기본값은 `gnn_rag_gnn_exact`이며,
-  relation 텍스트를 GNN-RAG `gnn`과 동일하게 `fields[-2] + fields[-1]` 규칙으로 만듭니다.
-- `TRAIN_STYLE` (default: `gnn_rag`, phase1을 relation CE 중심으로 고정)
-- `ENTITY_NAMES_JSON` (default: `data/data/entities_names.json`)
-- `RESULTS_DIR` (default: `experiments/paperstyle_rl/results`)
+- `WANDB_MODE`, `WANDB_PROJECT`, `WANDB_ENTITY`
+- `CKPT_DIR_PHASE1`, `CKPT_DIR_PHASE2`, `RESULTS_DIR`
 
-예시:
+Test-stage variables:
 
-```bash
-cd /data2/workspace/heewon/GRAPH-TRAVERSE
-EPOCHS_PHASE1=20 EPOCHS_PHASE2=10 WANDB_ENTITY=<your_entity> \
-bash experiments/paperstyle_rl/run_all.sh
-```
+- `TEST_EVAL_LIMIT`, `TEST_DEBUG_EVAL_N`, `TEST_EVAL_PRED_TOPK`
+- `TEST_EVAL_NO_CYCLE`, `TEST_EVAL_USE_HALT`
+- `TEST_EVAL_MAX_NEIGHBORS`, `TEST_EVAL_PRUNE_KEEP`
+- `TEST_EVAL_BEAM`, `TEST_EVAL_START_TOPK`
 
-## 참고
+## Notes
 
-- phase2 스크립트는 기본으로 phase1의 마지막 체크포인트를 자동 탐색합니다.
-- 자동 탐색이 안되면 `PHASE1_CKPT=/path/to/model_epX.pt`를 지정하세요.
-- 최종 test 지표는 `experiments/paperstyle_rl/results/*.summary.txt`에 저장됩니다.
+- In `gnn_rag_gnn_exact` mode, query/passage prefixes are empty.
+- Phase2 automatically uses the latest phase1 checkpoint unless `PHASE1_CKPT` is set.
+- Test stage uses the latest phase2 checkpoint unless `PHASE2_CKPT` is set.
+- Test summaries/logs are under `experiments/paperstyle_rl/results/`.
