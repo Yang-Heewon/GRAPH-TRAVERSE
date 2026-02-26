@@ -74,6 +74,8 @@ def enrich_paths(cfg):
     had_processed_dir = 'processed_dir' in cfg
     had_emb_dir = 'emb_dir' in cfg
     had_ckpt_dir = 'ckpt_dir' in cfg
+    had_eval_json = 'eval_json' in cfg
+    had_query_emb_eval_npy = 'query_emb_eval_npy' in cfg
 
     cfg.setdefault('processed_dir', os.path.join(cfg['workspace_root'], 'trm_agent', 'processed', cfg['dataset']))
     cfg.setdefault('emb_dir', os.path.join(cfg['workspace_root'], 'trm_agent', 'emb', f"{cfg['dataset']}_{cfg['emb_tag']}"))
@@ -103,19 +105,20 @@ def enrich_paths(cfg):
     cfg['test_jsonl'] = os.path.join(cfg['processed_dir'], 'test.jsonl')
     cfg['train_json'] = cfg['train_jsonl']
     cfg['dev_json'] = cfg['dev_jsonl']
-    cfg['eval_json'] = cfg['test_jsonl'] if os.path.exists(cfg['test_jsonl']) else cfg['dev_jsonl']
+    if not had_eval_json:
+        cfg['eval_json'] = cfg['test_jsonl'] if os.path.exists(cfg['test_jsonl']) else cfg['dev_jsonl']
 
     cfg['entity_emb_npy'] = os.path.join(cfg['emb_dir'], 'entity_embeddings.npy')
     cfg['relation_emb_npy'] = os.path.join(cfg['emb_dir'], 'relation_embeddings.npy')
     cfg['query_emb_train_npy'] = os.path.join(cfg['emb_dir'], 'query_train.npy')
     cfg['query_emb_dev_npy'] = os.path.join(cfg['emb_dir'], 'query_dev.npy')
     query_test = os.path.join(cfg['emb_dir'], 'query_test.npy')
-    # Keep eval query embeddings aligned with eval split.
-    # For test evaluation, require query_test.npy (fail-fast if missing).
-    if cfg['eval_json'] == cfg['test_jsonl']:
-        cfg['query_emb_eval_npy'] = query_test
-    else:
-        cfg['query_emb_eval_npy'] = cfg['query_emb_dev_npy']
+    # Keep eval query embeddings aligned with eval split only when user did not override.
+    if not had_query_emb_eval_npy:
+        if cfg.get('eval_json', '') == cfg['test_jsonl']:
+            cfg['query_emb_eval_npy'] = query_test
+        else:
+            cfg['query_emb_eval_npy'] = cfg['query_emb_dev_npy']
 
     return cfg
 

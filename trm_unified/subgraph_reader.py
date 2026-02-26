@@ -368,6 +368,8 @@ class RecursiveSubgraphReader(nn.Module):
         recursion_steps: int = 8,
         dropout: float = 0.1,
         use_direction_embedding: bool = False,
+        outer_reasoning_enabled: bool = False,
+        outer_reasoning_steps: int = 3,
     ):
         super().__init__()
         self.entity_dim = int(entity_dim)
@@ -376,6 +378,8 @@ class RecursiveSubgraphReader(nn.Module):
         self.hidden_size = int(hidden_size)
         self.recursion_steps = max(1, int(recursion_steps))
         self.use_direction_embedding = bool(use_direction_embedding)
+        self.outer_reasoning_enabled = bool(outer_reasoning_enabled)
+        self.outer_reasoning_steps = max(1, int(outer_reasoning_steps))
 
         self.node_proj = nn.Linear(self.entity_dim, self.hidden_size)
         self.rel_proj = nn.Linear(self.relation_dim, self.hidden_size)
@@ -389,8 +393,39 @@ class RecursiveSubgraphReader(nn.Module):
         self.step_norm = nn.LayerNorm(self.hidden_size)
         self.dropout = nn.Dropout(float(dropout))
         self.out_head = nn.Linear(self.hidden_size, 1)
+        if self.outer_reasoning_enabled:
+            self.outer_state_update = nn.GRUCell(self.hidden_size, self.hidden_size)
+            self.outer_state_norm = nn.LayerNorm(self.hidden_size)
         if self.use_direction_embedding:
             self.edge_dir_emb = nn.Embedding(2, self.hidden_size)
+
+    def _inner_recur(
+        self,
+        h: torch.Tensor,
+        h0: torch.Tensor,
+        src: Optional[torch.Tensor],
+        dst: Optional[torch.Tensor],
+        rel_h: Optional[torch.Tensor],
+        ones: Optional[torch.Tensor],
+        q_inj: torch.Tensor,
+        n: int,
+        e: int,
+    ) -> torch.Tensor:
+        for _ in range(self.recursion_steps):
+            agg = torch.zeros_like(h)
+            if e > 0 and src is not None and dst is not None and rel_h is not None:
+                q_rep = q_inj.expand(e, -1)
+                msg_in = torch.cat([h[src], rel_h, q_rep], dim=-1)
+                msg = self.msg_mlp(msg_in)
+                agg.index_add_(0, dst, msg)
+                deg = torch.zeros((n,), dtype=h.dtype, device=h.device)
+                deg.index_add_(0, dst, ones)
+                agg = agg / deg.clamp(min=1.0).unsqueeze(-1)
+            agg = agg + 0.1 * h0
+            h = self.cell(agg, h)
+            h = self.step_norm(h)
+            h = self.dropout(h)
+        return h
 
     def forward(
         self,
@@ -431,22 +466,46 @@ class RecursiveSubgraphReader(nn.Module):
                 rel_h = None
                 ones = None
 
-            for _ in range(self.recursion_steps):
-                agg = torch.zeros_like(h)
-                if e > 0 and src is not None and dst is not None and rel_h is not None:
-                    q_rep = qb.expand(e, -1)
-                    msg_in = torch.cat([h[src], rel_h, q_rep], dim=-1)
-                    msg = self.msg_mlp(msg_in)
-                    agg.index_add_(0, dst, msg)
-                    deg = torch.zeros((n,), dtype=h.dtype, device=h.device)
-                    deg.index_add_(0, dst, ones)
-                    agg = agg / deg.clamp(min=1.0).unsqueeze(-1)
-                agg = agg + 0.1 * h0
-                h = self.cell(agg, h)
-                h = self.step_norm(h)
-                h = self.dropout(h)
+            if not self.outer_reasoning_enabled:
+                h = self._inner_recur(
+                    h=h,
+                    h0=h0,
+                    src=src,
+                    dst=dst,
+                    rel_h=rel_h,
+                    ones=ones,
+                    q_inj=qb,
+                    n=n,
+                    e=e,
+                )
+                y_logits = self.out_head(h).squeeze(-1)
+            else:
+                # Global latent recursion over (y_k, z_k):
+                # y_k: temporary node-answer distribution (from node logits)
+                # z_k: global reasoning state updated from y_k-weighted graph context
+                z = qb.squeeze(0)
+                y_logits = self.out_head(h).squeeze(-1)
+                for _ in range(self.outer_reasoning_steps):
+                    y_prob = torch.sigmoid(y_logits)
+                    denom = y_prob.sum().clamp(min=1e-6)
+                    ctx = (h * y_prob.unsqueeze(-1)).sum(dim=0) / denom
+                    z = self.outer_state_update(ctx.unsqueeze(0), z.unsqueeze(0)).squeeze(0)
+                    z = self.outer_state_norm(z)
+                    q_loop = qb + z.unsqueeze(0)
+                    h = self._inner_recur(
+                        h=h,
+                        h0=h0,
+                        src=src,
+                        dst=dst,
+                        rel_h=rel_h,
+                        ones=ones,
+                        q_inj=q_loop,
+                        n=n,
+                        e=e,
+                    )
+                    y_logits = self.out_head(h).squeeze(-1)
 
-            logits[i, :n] = self.out_head(h).squeeze(-1)
+            logits[i, :n] = y_logits
 
         return logits
 
@@ -700,6 +759,8 @@ def _load_model_from_ckpt_or_init(
     recursion_steps: int,
     dropout: float,
     use_direction_embedding: bool = False,
+    outer_reasoning_enabled: bool = False,
+    outer_reasoning_steps: int = 3,
 ) -> Tuple[RecursiveSubgraphReader, Optional[dict]]:
     meta = None
     if ckpt_path and os.path.exists(ckpt_path):
@@ -709,6 +770,10 @@ def _load_model_from_ckpt_or_init(
             model_cfg = obj.get("model_cfg", {})
             if isinstance(model_cfg, dict) and "use_direction_embedding" in model_cfg:
                 use_direction_embedding = _as_bool(model_cfg.get("use_direction_embedding", False))
+            if isinstance(model_cfg, dict) and "outer_reasoning_enabled" in model_cfg:
+                outer_reasoning_enabled = _as_bool(model_cfg.get("outer_reasoning_enabled", False))
+            if isinstance(model_cfg, dict) and "outer_reasoning_steps" in model_cfg:
+                outer_reasoning_steps = int(model_cfg.get("outer_reasoning_steps", 3))
 
     model = RecursiveSubgraphReader(
         entity_dim=entity_dim,
@@ -718,6 +783,8 @@ def _load_model_from_ckpt_or_init(
         recursion_steps=recursion_steps,
         dropout=dropout,
         use_direction_embedding=bool(use_direction_embedding),
+        outer_reasoning_enabled=bool(outer_reasoning_enabled),
+        outer_reasoning_steps=max(1, int(outer_reasoning_steps)),
     )
     if ckpt_path and os.path.exists(ckpt_path):
         obj = meta if meta is not None else torch.load(ckpt_path, map_location="cpu")
@@ -763,6 +830,8 @@ def train_subgraph_reader(
         getattr(args, "subgraph_direction_embedding_enabled", split_reverse_relations),
         default=split_reverse_relations,
     )
+    outer_reasoning_enabled = _as_bool(getattr(args, "subgraph_outer_reasoning_enabled", False))
+    outer_reasoning_steps = max(1, int(getattr(args, "subgraph_outer_reasoning_steps", 3)))
     ranking_enabled = _as_bool(getattr(args, "subgraph_ranking_enabled", False))
     ranking_weight = max(0.0, float(getattr(args, "subgraph_ranking_weight", 0.0)))
     ranking_margin = float(getattr(args, "subgraph_ranking_margin", 0.2))
@@ -781,6 +850,7 @@ def train_subgraph_reader(
     lr_plateau_metric = str(getattr(args, "subgraph_lr_plateau_metric", "train_loss")).strip().lower()
     if lr_plateau_metric not in {"train_loss", "dev_hit1", "dev_f1"}:
         lr_plateau_metric = "train_loss"
+    grad_accum_steps = max(1, int(getattr(args, "subgraph_grad_accum_steps", 1)))
     resume_epoch_cfg = int(getattr(args, "subgraph_resume_epoch", -1))
     if resume_epoch_cfg >= 0:
         resume_epoch = int(resume_epoch_cfg)
@@ -827,6 +897,8 @@ def train_subgraph_reader(
         recursion_steps=recursion_steps,
         dropout=dropout,
         use_direction_embedding=direction_embedding_enabled,
+        outer_reasoning_enabled=outer_reasoning_enabled,
+        outer_reasoning_steps=outer_reasoning_steps,
     )
     model.to(device)
     if is_ddp:
@@ -896,10 +968,13 @@ def train_subgraph_reader(
             f"reverse_edges={add_reverse_edges} "
             f"split_reverse_relations={split_reverse_relations} "
             f"direction_embedding={direction_embedding_enabled} "
+            f"outer_reasoning={outer_reasoning_enabled} "
+            f"outer_steps={outer_reasoning_steps} "
             f"pos_weight_mode={pos_weight_mode} "
             f"ranking_enabled={ranking_enabled} "
             f"bce_hardneg={bce_hard_negative_enabled} "
-            f"lr={float(args.lr):.3e} scheduler={lr_scheduler_mode}"
+            f"lr={float(args.lr):.3e} scheduler={lr_scheduler_mode} "
+            f"grad_accum={grad_accum_steps}"
         )
         if resume_epoch > 0:
             print(f"[SubgraphReader-Resume] start_from_ep={resume_epoch}")
@@ -918,10 +993,13 @@ def train_subgraph_reader(
         pos_weight_n = 0
         rank_pairs_sum = 0
         bce_keep_sum = 0
+        optimizer_steps = 0
+        opt.zero_grad(set_to_none=True)
+        last_grad_norm = 0.0
+        num_batches = len(loader)
 
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar, start=1):
             batch_dev = _move_batch_to_device(batch, device)
-            opt.zero_grad(set_to_none=True)
             logits = model(
                 node_emb=batch_dev["node_emb"],
                 node_mask=batch_dev["node_mask"],
@@ -980,9 +1058,20 @@ def train_subgraph_reader(
                 if is_ddp:
                     raise RuntimeError("non-finite subgraph reader loss in DDP")
                 continue
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            do_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
+            scaled_loss = loss / float(grad_accum_steps)
+            if is_ddp and (not do_step):
+                with model.no_sync():
+                    scaled_loss.backward()
+                grad_norm_val = float(last_grad_norm)
+            else:
+                scaled_loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                grad_norm_val = float(grad_norm)
+                last_grad_norm = grad_norm_val
+                optimizer_steps += 1
 
             steps += 1
             tot_loss += float(loss.item())
@@ -997,7 +1086,7 @@ def train_subgraph_reader(
                 pw = pos_weight_sum / max(1, pos_weight_n)
                 pbar.set_postfix_str(
                     f"loss={loss.item():.4f} bce={bce_loss.item():.4f} rank={rank_loss.item():.4f} "
-                    f"avg={tot_loss/max(1,steps):.4f} pw={pw:.2f} grad={float(grad_norm):.2e}"
+                    f"avg={tot_loss/max(1,steps):.4f} pw={pw:.2f} grad={grad_norm_val:.2e}"
                 )
                 if wb is not None:
                     wb.log(
@@ -1009,7 +1098,8 @@ def train_subgraph_reader(
                             "train/step_pos_weight": float(pw),
                             "train/step_rank_pairs": int(rank_pairs),
                             "train/step_bce_kept_nodes": int(bce_kept),
-                            "train/grad_norm": float(grad_norm),
+                            "train/grad_norm": float(grad_norm_val),
+                            "train/step_optimizer_steps": int(optimizer_steps),
                             "train/epoch": int(ep),
                             "train/step": int(steps),
                         },
@@ -1068,6 +1158,8 @@ def train_subgraph_reader(
                     "recursion_steps": int(save_obj.recursion_steps),
                     "dropout": float(dropout),
                     "use_direction_embedding": bool(direction_embedding_enabled),
+                    "outer_reasoning_enabled": bool(outer_reasoning_enabled),
+                    "outer_reasoning_steps": int(outer_reasoning_steps),
                 },
                 "subgraph_cfg": {
                     "hops": int(hops),
@@ -1076,6 +1168,9 @@ def train_subgraph_reader(
                     "add_reverse_edges": bool(add_reverse_edges),
                     "split_reverse_relations": bool(split_reverse_relations),
                     "pred_threshold": float(threshold),
+                    "outer_reasoning_enabled": bool(outer_reasoning_enabled),
+                    "outer_reasoning_steps": int(outer_reasoning_steps),
+                    "grad_accum_steps": int(grad_accum_steps),
                 },
             }
             torch.save(payload, ckpt)
@@ -1084,7 +1179,8 @@ def train_subgraph_reader(
             print(
                 f"[Train-Subgraph] ep={ep} loss={mean_loss:.4f} "
                 f"bce={mean_bce:.4f} rank={mean_rank:.4f} "
-                f"rank_pairs/step={mean_rank_pairs:.2f} bce_kept/step={mean_bce_kept:.1f}"
+                f"rank_pairs/step={mean_rank_pairs:.2f} bce_kept/step={mean_bce_kept:.1f} "
+                f"opt_steps={optimizer_steps}"
             )
             if wb is not None:
                 wb.log(
@@ -1094,6 +1190,7 @@ def train_subgraph_reader(
                         "train/epoch_avg_rank_loss": float(mean_rank),
                         "train/epoch_avg_rank_pairs": float(mean_rank_pairs),
                         "train/epoch_avg_bce_kept_nodes": float(mean_bce_kept),
+                        "train/epoch_optimizer_steps": int(optimizer_steps),
                         "train/epoch": int(ep),
                     },
                     step=ep * max(1, len(loader)),
@@ -1204,6 +1301,12 @@ def test_subgraph_reader(args):
     direction_embedding_enabled = _as_bool(
         getattr(args, "subgraph_direction_embedding_enabled", model_cfg.get("use_direction_embedding", False))
     )
+    outer_reasoning_enabled = _as_bool(
+        getattr(args, "subgraph_outer_reasoning_enabled", model_cfg.get("outer_reasoning_enabled", False))
+    )
+    outer_reasoning_steps = max(
+        1, int(getattr(args, "subgraph_outer_reasoning_steps", model_cfg.get("outer_reasoning_steps", 3)))
+    )
 
     model = RecursiveSubgraphReader(
         entity_dim=ent_dim,
@@ -1213,6 +1316,8 @@ def test_subgraph_reader(args):
         recursion_steps=recursion_steps,
         dropout=dropout,
         use_direction_embedding=direction_embedding_enabled,
+        outer_reasoning_enabled=outer_reasoning_enabled,
+        outer_reasoning_steps=outer_reasoning_steps,
     )
     sd = ckpt_obj.get("model_state", ckpt_obj) if isinstance(ckpt_obj, dict) else ckpt_obj
     skipped, missing = _safe_load_state_dict(model, sd)
@@ -1232,6 +1337,9 @@ def test_subgraph_reader(args):
     threshold = float(getattr(args, "subgraph_pred_threshold", sub_cfg.get("pred_threshold", 0.5)))
 
     eval_ds = SubgraphExampleDataset(args.eval_json)
+    eval_limit = int(getattr(args, "eval_limit", -1))
+    if eval_limit > 0 and len(eval_ds) > eval_limit:
+        eval_ds = Subset(eval_ds, list(range(eval_limit)))
     eval_collate = SubgraphCollator(
         entity_emb_npy=args.entity_emb_npy,
         relation_emb_npy=args.relation_emb_npy,

@@ -52,6 +52,8 @@ def run(cfg):
         subgraph_add_reverse_edges=_as_bool(cfg.get('subgraph_add_reverse_edges', True)),
         subgraph_split_reverse_relations=_as_bool(cfg.get('subgraph_split_reverse_relations', False)),
         subgraph_direction_embedding_enabled=_as_bool(cfg.get('subgraph_direction_embedding_enabled', False)),
+        subgraph_outer_reasoning_enabled=_as_bool(cfg.get('subgraph_outer_reasoning_enabled', False)),
+        subgraph_outer_reasoning_steps=int(cfg.get('subgraph_outer_reasoning_steps', 3)),
         subgraph_recursion_steps=int(cfg.get('subgraph_recursion_steps', 8)),
         subgraph_dropout=float(cfg.get('subgraph_dropout', 0.1)),
         subgraph_pred_threshold=float(cfg.get('subgraph_pred_threshold', 0.5)),
