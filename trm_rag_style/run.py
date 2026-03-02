@@ -1,5 +1,6 @@
 import os
 import re
+from contextlib import contextmanager
 
 from .config_utils import build_parser, load_run_config
 from .trm_pipeline import preprocess as trm_pre
@@ -27,6 +28,26 @@ def _infer_resume_epoch_from_ckpt(ckpt_path: str) -> int:
         return max(0, int(m.group(1)))
     except Exception:
         return 0
+
+
+@contextmanager
+def _single_process_dist_env():
+    """Temporarily mask distributed env vars so test runs in single-process mode."""
+    keys = ("RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = "1"
+        os.environ["LOCAL_RANK"] = "0"
+        os.environ.pop("MASTER_ADDR", None)
+        os.environ.pop("MASTER_PORT", None)
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def normalize_config_paths(cfg):
@@ -155,6 +176,8 @@ def main():
             '1', 'true', 'yes', 'y', 'on'
         }
         if auto_test_after_train:
+            rank = int(os.environ.get("RANK", "0"))
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
             last_ep = int(cfg.get('epochs', 1))
             subgraph_enabled = str(cfg.get('subgraph_reader_enabled', False)).strip().lower() in {
                 '1', 'true', 'yes', 'y', 'on'
@@ -171,10 +194,17 @@ def main():
             if not os.path.exists(ckpt_path):
                 print(f"[warn] auto_test_after_train enabled but checkpoint not found: {ckpt_path}")
             else:
+                if world_size > 1 and rank != 0:
+                    print("[AutoTest] skip on non-main rank (will run on rank0 in single-process mode)")
+                    return
                 test_cfg = dict(cfg)
                 test_cfg['ckpt'] = ckpt_path
                 print(f"[AutoTest] run test with {ckpt_path}")
-                trm_test.run(test_cfg)
+                if world_size > 1:
+                    with _single_process_dist_env():
+                        trm_test.run(test_cfg)
+                else:
+                    trm_test.run(test_cfg)
 
     if stage == 'test':
         if not cfg.get('ckpt'):

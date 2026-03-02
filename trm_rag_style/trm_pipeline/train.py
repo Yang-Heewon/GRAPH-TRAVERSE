@@ -116,6 +116,24 @@ def run(cfg):
         subgraph_rearev_dynamic_halting_min_steps=int(
             cfg.get('subgraph_rearev_dynamic_halting_min_steps', 1)
         ),
+        subgraph_rearev_trm_style_enabled=_as_bool(
+            cfg.get('subgraph_rearev_trm_style_enabled', False)
+        ),
+        subgraph_rearev_trm_tminus1_no_grad=_as_bool(
+            cfg.get('subgraph_rearev_trm_tminus1_no_grad', True)
+        ),
+        subgraph_rearev_trm_detach_carry=_as_bool(
+            cfg.get('subgraph_rearev_trm_detach_carry', True)
+        ),
+        subgraph_rearev_trm_halt_bce_weight=float(
+            cfg.get('subgraph_rearev_trm_halt_bce_weight', 1.0)
+        ),
+        subgraph_rearev_trm_ce_weight=float(
+            cfg.get('subgraph_rearev_trm_ce_weight', 1.0)
+        ),
+        subgraph_rearev_trm_weight=float(
+            cfg.get('subgraph_rearev_trm_weight', 1.0)
+        ),
         subgraph_dropout=float(cfg.get('subgraph_dropout', 0.1)),
         subgraph_pred_threshold=float(cfg.get('subgraph_pred_threshold', 0.5)),
         subgraph_loss_mode=str(cfg.get('subgraph_loss_mode', 'rearev_kl')),
