@@ -6,6 +6,22 @@ This repository is now configured to run the **ReaRev-only** subgraph reader pat
 - Subgraph variant is fixed to `rearev_bfs` during train/test.
 - Recursion depth is controlled by `SUBGRAPH_RECURSION_STEPS`.
 
+## Recursive ReaRev Summary
+
+The core model is a recursive graph reasoner with optional latent/global controls:
+
+- Step update uses relation-aware forward/inverse message passing.
+- Node update can be gated by global latent state (`global_gate`).
+- Node score can fuse local node state + global latent context (`logit_global_fusion`).
+- Latent state is updated every recursion step (`GRU` over weighted node context).
+- Dynamic halting predicts stop probability from latent state.
+
+Phase objectives:
+
+- Phase1 (`rearev_kl`): KL over node distribution, optional deep supervision
+  - `KL + lambda_ds * (step_ce + halt_bce)`
+- Phase2 (`bce`): BCE + ranking + hard negatives
+
 ## Core Scripts (D / D+latent)
 
 - `run_download.sh`
